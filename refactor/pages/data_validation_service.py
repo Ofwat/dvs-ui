@@ -12,6 +12,7 @@ from online_auth import (
     list_fabric_lakehouses,
     list_fabric_workspaces,
     list_lakehouse_files,
+    transfer_sharepoint_file_to_lakehouse,
     list_sharepoint_drive_items,
     list_sharepoint_resources,
 )
@@ -281,24 +282,50 @@ def _find_item_name(items: list[dict], item_id: str) -> str | None:
 
 def _render_sharepoint_item(item: dict, service_path: str, mode_slug: str):
     label = item.get("name", "Untitled")
-    button_id = _explorer_id(
-        service_path,
-        mode_slug,
-        "folder-open" if item.get("isFolder") else "file-download",
-        item=item.get("id"),
-    )
-    button_text = "Open folder" if item.get("isFolder") else "Download file"
+    is_folder = item.get("isFolder")
     return html.Li(
         className="govuk-!-margin-bottom-1",
         children=[
             html.Div(label, className="govuk-body"),
             html.Div(
-                html.Button(
-                    button_text,
-                    id=button_id,
-                    n_clicks=0,
-                    className="govuk-button govuk-button--secondary govuk-!-margin-top-1",
-                    type="button",
+                (
+                    html.Button(
+                        "Open folder",
+                        id=_explorer_id(service_path, mode_slug, "folder-open", item=item.get("id")),
+                        n_clicks=0,
+                        className="govuk-button govuk-button--secondary govuk-!-margin-top-1",
+                        type="button",
+                    )
+                    if is_folder
+                    else html.Div(
+                        children=[
+                            html.Button(
+                                "Select file",
+                                id=_explorer_id(
+                                    service_path,
+                                    mode_slug,
+                                    "file-select",
+                                    item=item.get("id"),
+                                ),
+                                n_clicks=0,
+                                className="govuk-button govuk-button--secondary govuk-!-margin-top-1",
+                                type="button",
+                            ),
+                            html.Button(
+                                "Download file",
+                                id=_explorer_id(
+                                    service_path,
+                                    mode_slug,
+                                    "file-download",
+                                    item=item.get("id"),
+                                ),
+                                n_clicks=0,
+                                className="govuk-button govuk-button--secondary govuk-!-margin-top-1 govuk-!-margin-left-2",
+                                type="button",
+                            ),
+                        ],
+                        className="govuk-button-group",
+                    )
                 ),
                 className="govuk-!-margin-top-1",
             ),
@@ -351,6 +378,8 @@ def build_sharepoint_explorer(
     drives_store_id = _explorer_id(service_path, mode_slug, "drive-store")
     state_store_id = _explorer_id(service_path, mode_slug, "state-store")
     items_store_id = _explorer_id(service_path, mode_slug, "items-store")
+    selection_store_id = _explorer_id(service_path, mode_slug, "selection-store")
+    selection_id = _explorer_id(service_path, mode_slug, "selection-label")
     items_container_id = _explorer_id(service_path, mode_slug, "items-container")
     breadcrumb_id = _explorer_id(service_path, mode_slug, "breadcrumb")
     download_id = _explorer_id(service_path, mode_slug, "download")
@@ -386,8 +415,14 @@ def build_sharepoint_explorer(
                 id=state_store_id,
                 data={"drive_id": None, "drive_name": "", "breadcrumbs": []},
             ),
+            dcc.Store(id=selection_store_id, data={}),
             dcc.Store(id=drives_store_id, data={"drives": drives or []}),
             dcc.Store(id=items_store_id, data={"items": []}),
+            html.Div(
+                id=selection_id,
+                className="govuk-body govuk-!-margin-bottom-3",
+                children="Selected file: none",
+            ),
             html.Div(
                 className="govuk-grid-row govuk-!-margin-bottom-4",
                 children=[
@@ -440,6 +475,10 @@ def build_fabric_explorer(service: dict, mode: dict):
     workspace_dropdown_id = _fabric_id(service_path, mode_slug, "workspace-dropdown")
     lakehouse_dropdown_id = _fabric_id(service_path, mode_slug, "lakehouse-dropdown")
     file_list_id = _fabric_id(service_path, mode_slug, "file-list")
+    transfer_button_id = _fabric_id(service_path, mode_slug, "transfer")
+    transfer_status_id = _fabric_id(service_path, mode_slug, "transfer-status")
+    fabric_selection_id = _fabric_id(service_path, mode_slug, "selection-label")
+    sharepoint_selection_store = _explorer_id(service_path, mode_slug, "selection-store")
 
     return html.Div(
         className="govuk-!-margin-top-6",
@@ -492,6 +531,16 @@ def build_fabric_explorer(service: dict, mode: dict):
                 ],
             ),
             html.Div(id=file_list_id, className="govuk-body"),
+            html.H4("Transfer to lakehouse", className="govuk-heading-s"),
+            html.Div(id=fabric_selection_id, className="govuk-body govuk-!-margin-bottom-2"),
+            html.Button(
+                "Copy selected file to Uploads",
+                id=transfer_button_id,
+                n_clicks=0,
+                className="govuk-button govuk-button--secondary govuk-!-margin-bottom-2",
+                type="button",
+            ),
+            html.Div(id=transfer_status_id, className="govuk-body govuk-!-margin-bottom-3"),
             html.P(
                 "Lakehouse files are listed from OneLake (Files).",
                 className="govuk-hint",
@@ -680,6 +729,40 @@ def _register_sharepoint_callbacks(app):
             raise PreventUpdate
         return dcc.send_bytes(lambda buffer: buffer.write(payload), file_name)
 
+    @app.callback(
+        Output({"type": "sharepoint-selection-store", "service": MATCH, "mode": MATCH}, "data"),
+        Output({"type": "sharepoint-selection-label", "service": MATCH, "mode": MATCH}, "children"),
+        Input(
+            {"type": "sharepoint-file-select", "service": MATCH, "mode": MATCH, "item": ALL},
+            "n_clicks",
+        ),
+        State({"type": "sharepoint-items-store", "service": MATCH, "mode": MATCH}, "data"),
+        State({"type": "sharepoint-state-store", "service": MATCH, "mode": MATCH}, "data"),
+        prevent_initial_call=True,
+    )
+    def select_sharepoint_file(n_clicks, items_store, state_data):
+        if not n_clicks or max((count or 0) for count in n_clicks) == 0:
+            raise PreventUpdate
+        if not dash.callback_context.triggered:
+            raise PreventUpdate
+        triggered = dash.callback_context.triggered[0]
+        component_id = json.loads(triggered["prop_id"].split(".")[0])
+        item_id = component_id.get("item")
+        if not item_id:
+            raise PreventUpdate
+        items = items_store.get("items", []) if items_store else []
+        selected = next((item for item in items if item.get("id") == item_id), None)
+        if not selected:
+            raise PreventUpdate
+        drive_id = (state_data or {}).get("drive_id")
+        if not drive_id:
+            raise PreventUpdate
+        name = selected.get("name", "selected file")
+        return (
+            {"drive_id": drive_id, "item_id": item_id, "name": name},
+            f"Selected file: {name}",
+        )
+
 
 def _register_fabric_callbacks(app):
     @app.callback(
@@ -767,3 +850,40 @@ def _register_fabric_callbacks(app):
         )
         message = f"Loaded {len(files)} items."
         return {"files": files}, file_list, message
+
+    @app.callback(
+        Output({"type": "fabric-selection-label", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "sharepoint-selection-store", "service": MATCH, "mode": MATCH}, "data"),
+    )
+    def sync_fabric_selection(selection_data):
+        if not selection_data:
+            return "Selected file: none"
+        return f"Selected file: {selection_data.get('name', 'file')}"
+
+    @app.callback(
+        Output({"type": "fabric-transfer-status", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "fabric-transfer", "service": MATCH, "mode": MATCH}, "n_clicks"),
+        State({"type": "fabric-workspace-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        State({"type": "fabric-lakehouse-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        State({"type": "sharepoint-selection-store", "service": MATCH, "mode": MATCH}, "data"),
+        prevent_initial_call=True,
+    )
+    def transfer_sharepoint_to_lakehouse(
+        n_clicks, workspace_id, lakehouse_id, selection_data
+    ):
+        if not n_clicks:
+            raise PreventUpdate
+        if not selection_data:
+            return "Select a SharePoint file first."
+        if not workspace_id or not lakehouse_id:
+            return "Select a Fabric workspace and lakehouse first."
+        success, message = transfer_sharepoint_file_to_lakehouse(
+            selection_data.get("drive_id"),
+            selection_data.get("item_id"),
+            selection_data.get("name", "file"),
+            workspace_id,
+            lakehouse_id,
+        )
+        if not success:
+            return f"Transfer failed: {message}"
+        return message

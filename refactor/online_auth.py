@@ -3,11 +3,33 @@ from __future__ import annotations
 import os
 import time
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from azure.identity import InteractiveBrowserCredential
 
-from env_utils import load_env
+try:
+    from env_utils import load_env
+except ImportError:
+    import importlib.util
+    from pathlib import Path
+
+    candidates = []
+    if "__file__" in globals():
+        candidates.append(Path(__file__).resolve().parent / "env_utils.py")
+    cwd = Path.cwd()
+    candidates.append(cwd / "refactor" / "env_utils.py")
+    candidates.append(cwd / "env_utils.py")
+
+    _env_path = next((path for path in candidates if path.exists()), None)
+    if not _env_path:
+        raise
+    _spec = importlib.util.spec_from_file_location("env_utils", _env_path)
+    if not _spec or not _spec.loader:
+        raise
+    _module = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_module)
+    load_env = _module.load_env  # type: ignore[attr-defined]
 
 
 load_env()
@@ -23,6 +45,7 @@ FABRIC_LAKEHOUSE_TABLES_URL = (
     "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses/{lakehouse_id}/tables"
 )
 ONELAKE_LIST_PATHS_URL = "https://onelake.dfs.fabric.microsoft.com/{filesystem}"
+ONELAKE_FILE_URL = "https://onelake.dfs.fabric.microsoft.com/{filesystem}/{path}"
 SHAREPOINT_DRIVE_URL = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_HOST}:/{SITE_PATH}:/drives"
 SHAREPOINT_DRIVE_ITEMS_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/root/children"
 SHAREPOINT_DRIVE_ITEM_CHILDREN_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/items/{item}/children"
@@ -171,6 +194,55 @@ def list_lakehouse_files(
             )
         return True, items
     return False, response.text
+
+
+def upload_lakehouse_file(
+    workspace_id: str, lakehouse_id: str, filename: str, content: bytes
+) -> tuple[bool, str]:
+    headers = _cached_headers(ONELAKE_SCOPE)
+    if not headers:
+        _acquire_token(ONELAKE_SCOPE, force=True)
+        headers = _cached_headers(ONELAKE_SCOPE)
+        if not headers:
+            return False, "Sign in to upload OneLake files."
+    headers = {
+        **headers,
+        "x-ms-version": "2023-08-03",
+    }
+    path = f"{lakehouse_id}/Files/Uploads/{filename}"
+    url = ONELAKE_FILE_URL.format(filesystem=workspace_id, path=quote(path))
+    create = requests.put(url, headers=headers, params={"resource": "file"})
+    if not create.ok:
+        return False, create.text
+    append = requests.patch(
+        url,
+        headers=headers,
+        params={"action": "append", "position": 0},
+        data=content,
+    )
+    if not append.ok:
+        return False, append.text
+    flush = requests.patch(
+        url,
+        headers=headers,
+        params={"action": "flush", "position": len(content)},
+    )
+    if not flush.ok:
+        return False, flush.text
+    return True, f"Uploaded {filename} to lakehouse."
+
+
+def transfer_sharepoint_file_to_lakehouse(
+    drive_id: str,
+    item_id: str,
+    filename: str,
+    workspace_id: str,
+    lakehouse_id: str,
+) -> tuple[bool, str]:
+    success, payload = download_sharepoint_item(drive_id, item_id)
+    if not success:
+        return False, f"SharePoint download failed: {payload}"
+    return upload_lakehouse_file(workspace_id, lakehouse_id, filename, payload)
 
 
 def list_sharepoint_resources() -> tuple[bool, list[dict[str, str]] | str]:
