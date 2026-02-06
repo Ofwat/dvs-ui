@@ -20,6 +20,7 @@ FABRIC_WORKSPACES_URL = "https://api.fabric.microsoft.com/v1/workspaces"
 SHAREPOINT_DRIVE_URL = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_HOST}:/{SITE_PATH}:/drives"
 SHAREPOINT_DRIVE_ITEMS_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/root/children"
 SHAREPOINT_DRIVE_ITEM_CHILDREN_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/items/{item}/children"
+SHAREPOINT_DRIVE_ITEM_CONTENT_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/items/{item}/content"
 LOCAL_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -72,7 +73,6 @@ def _acquire_token(scope: str, force: bool = False) -> dict[str, Any]:
 
 def check_token_access(force: bool = False) -> tuple[bool, Any]:
     token_data = _acquire_token(SHAREPOINT_SCOPE, force=force)
-    _acquire_token(FABRIC_SCOPE, force=force)
     headers = {"Authorization": f"Bearer {token_data['token']}"}
     response = requests.get(_sharepoint_api_url(), headers=headers)
     if response.ok:
@@ -83,7 +83,10 @@ def check_token_access(force: bool = False) -> tuple[bool, Any]:
 def list_fabric_workspaces() -> tuple[bool, list[dict] | str]:
     headers = _cached_headers(FABRIC_SCOPE)
     if not headers:
-        return False, "Sign in to list Fabric workspaces."
+        _acquire_token(FABRIC_SCOPE, force=True)
+        headers = _cached_headers(FABRIC_SCOPE)
+        if not headers:
+            return False, "Sign in to list Fabric workspaces."
     response = requests.get(FABRIC_WORKSPACES_URL, headers=headers)
     if response.ok:
         payload = response.json()
@@ -94,19 +97,25 @@ def list_fabric_workspaces() -> tuple[bool, list[dict] | str]:
 def list_sharepoint_resources() -> tuple[bool, list[dict[str, str]] | str]:
     headers = _cached_headers(SHAREPOINT_SCOPE)
     if not headers:
-        return False, "Sign in to list SharePoint resources."
+        _acquire_token(SHAREPOINT_SCOPE, force=True)
+        headers = _cached_headers(SHAREPOINT_SCOPE)
+        if not headers:
+            return False, "Sign in to list SharePoint resources."
     response = requests.get(SHAREPOINT_DRIVE_URL, headers=headers)
     if response.ok:
         payload = response.json()
+        drives_payload = payload.get("value", [])
+        print(f"[DEBUG] SharePoint drives: status={response.status_code} count={len(drives_payload)}")
         drives = [
             {
                 "name": drive.get("name", "Untitled drive"),
                 "webUrl": drive.get("webUrl"),
                 "id": drive.get("id"),
             }
-            for drive in payload.get("value", [])
+            for drive in drives_payload
         ]
         return True, drives
+    print(f"[DEBUG] SharePoint drives failed: status={response.status_code} body={response.text[:500]}")
     return False, response.text
 
 
@@ -136,3 +145,12 @@ def list_sharepoint_drive_items(
     return False, response.text
 
 
+def download_sharepoint_item(drive_id: str, item_id: str) -> tuple[bool, bytes | str]:
+    headers = _cached_headers(SHAREPOINT_SCOPE)
+    if not headers:
+        return False, "Sign in to download files."
+    url = SHAREPOINT_DRIVE_ITEM_CONTENT_URL.format(drive=drive_id, item=item_id)
+    response = requests.get(url, headers=headers)
+    if response.ok:
+        return True, response.content
+    return False, response.text

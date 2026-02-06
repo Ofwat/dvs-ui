@@ -1,11 +1,17 @@
 import json
 
 import dash
-from dash import Input, MATCH, Output, dcc, html
+from dash import ALL, Input, MATCH, Output, State, dcc, html
 from dash.exceptions import PreventUpdate
 
 from components.service_upload import build_service_upload_block
-from online_auth import check_token_access, get_cached_access_status
+from online_auth import (
+    check_token_access,
+    download_sharepoint_item,
+    get_cached_access_status,
+    list_sharepoint_drive_items,
+    list_sharepoint_resources,
+)
 
 
 SERVICE_DETAIL_PAGES = [
@@ -151,6 +157,8 @@ def build_offline_mode_app(service: dict):
 
 def _build_online_mode_panel_children(service: dict, mode: dict, force_auth: bool = False):
     detail_children = []
+    sharepoint_drives = None
+    sharepoint_status = "Tokens must be refreshed before browsing."
     if force_auth:
         success, payload = check_token_access(force=True)
         detail_message = (
@@ -168,12 +176,18 @@ def _build_online_mode_panel_children(service: dict, mode: dict, force_auth: boo
                     className="govuk-body govuk-!-margin-bottom-0",
                 )
             )
+            drives_success, drives_payload = list_sharepoint_resources()
+            if drives_success:
+                sharepoint_drives = drives_payload
+                sharepoint_status = "Select a drive to begin browsing."
+            else:
+                sharepoint_status = f"SharePoint drives unavailable: {drives_payload}"
 
     is_authenticated, status_message = get_cached_access_status()
     button_text = "Authenticate" if not is_authenticated else "Refresh authentication"
     button_id = {"type": "online-auth-button", "service": service["path"], "mode": mode["slug"]}
 
-    return [
+    children = [
         html.Div(
             className="govuk-grid-row govuk-!-margin-bottom-3",
             children=[
@@ -206,6 +220,8 @@ def _build_online_mode_panel_children(service: dict, mode: dict, force_auth: boo
             else []
         ),
     ]
+    children.append(build_sharepoint_explorer(service, mode, sharepoint_drives, sharepoint_status))
+    return children
 
 
 def build_online_mode_panel(service: dict, mode: dict):
@@ -219,7 +235,7 @@ def build_online_mode_panel(service: dict, mode: dict):
 def build_mode_detail(service: dict, mode: dict):
     sections = [
         html.H2(
-            f"{service['label']} · {mode['label']}",
+            f"{service['label']} - {mode['label']}",
             className="govuk-heading-l",
         ),
         html.P(mode["description"], className="govuk-body"),
@@ -243,6 +259,163 @@ def build_mode_detail(service: dict, mode: dict):
     return html.Div(
         className="govuk-grid-row govuk-!-margin-bottom-6",
         children=[html.Div(className="govuk-grid-column-full", children=sections)],
+    )
+
+
+def _explorer_id(service_path: str, mode_slug: str, kind: str, **extra):
+    base = {"type": f"sharepoint-{kind}", "service": service_path, "mode": mode_slug}
+    base.update(extra)
+    return base
+
+
+def _find_item_name(items: list[dict], item_id: str) -> str | None:
+    for item in items:
+        if item.get("id") == item_id:
+            return item.get("name")
+    return None
+
+
+def _render_sharepoint_item(item: dict, service_path: str, mode_slug: str):
+    label = item.get("name", "Untitled")
+    button_id = _explorer_id(
+        service_path,
+        mode_slug,
+        "folder-open" if item.get("isFolder") else "file-download",
+        item=item.get("id"),
+    )
+    button_text = "Open folder" if item.get("isFolder") else "Download file"
+    return html.Li(
+        className="govuk-!-margin-bottom-1",
+        children=[
+            html.Div(label, className="govuk-body"),
+            html.Div(
+                html.Button(
+                    button_text,
+                    id=button_id,
+                    n_clicks=0,
+                    className="govuk-button govuk-button--secondary govuk-!-margin-top-1",
+                    type="button",
+                ),
+                className="govuk-!-margin-top-1",
+            ),
+        ],
+    )
+
+
+def _render_sharepoint_items_list(
+    items: list[dict],
+    state: dict,
+    service_path: str,
+    mode_slug: str,
+):
+    children = []
+    drive_id = state.get("drive_id")
+    if not drive_id:
+        children.append(html.P("Select a drive to begin browsing.", className="govuk-body"))
+        return children
+    if not items:
+        children.append(html.P("This folder is empty.", className="govuk-body"))
+    else:
+        children.append(
+            html.Ul(
+                className="govuk-list govuk-list--bullet",
+                children=[
+                    _render_sharepoint_item(item, service_path, mode_slug)
+                    for item in items
+                ],
+            )
+        )
+    return children
+
+
+def _format_breadcrumbs(state: dict):
+    drive_name = state.get("drive_name") or "Selected drive"
+    breadcrumbs = [drive_name] + [crumb.get("name", "Folder") for crumb in state.get("breadcrumbs", [])]
+    return " / ".join(breadcrumbs)
+
+
+def build_sharepoint_explorer(
+    service: dict,
+    mode: dict,
+    drives: list[dict] | None = None,
+    status_message: str | None = None,
+):
+    service_path = service["path"]
+    mode_slug = mode["slug"]
+    status_id = _explorer_id(service_path, mode_slug, "status")
+    dropdown_id = _explorer_id(service_path, mode_slug, "drive-dropdown")
+    drives_store_id = _explorer_id(service_path, mode_slug, "drive-store")
+    state_store_id = _explorer_id(service_path, mode_slug, "state-store")
+    items_store_id = _explorer_id(service_path, mode_slug, "items-store")
+    items_container_id = _explorer_id(service_path, mode_slug, "items-container")
+    breadcrumb_id = _explorer_id(service_path, mode_slug, "breadcrumb")
+    download_id = _explorer_id(service_path, mode_slug, "download")
+
+    drive_options = []
+    drive_value = None
+    if drives:
+        drive_options = [
+            {"label": drive.get("name", "Drive"), "value": drive.get("id")}
+            for drive in drives
+        ]
+        if drive_options:
+            drive_value = drive_options[0]["value"]
+
+    return html.Div(
+        className="govuk-!-margin-top-5",
+        children=[
+            html.H3("SharePoint explorer", className="govuk-heading-s"),
+            html.Div(
+                className="govuk-body govuk-!-margin-bottom-3",
+                id=status_id,
+                children=status_message or "Tokens must be refreshed before browsing.",
+            ),
+            html.Button(
+                "Up one level",
+                id=_explorer_id(service_path, mode_slug, "folder-back"),
+                n_clicks=0,
+                className="govuk-button govuk-button--secondary govuk-!-margin-bottom-3",
+                type="button",
+                disabled=True,
+            ),
+            dcc.Store(
+                id=state_store_id,
+                data={"drive_id": None, "drive_name": "", "breadcrumbs": []},
+            ),
+            dcc.Store(id=drives_store_id, data={"drives": drives or []}),
+            dcc.Store(id=items_store_id, data={"items": []}),
+            html.Div(
+                className="govuk-grid-row govuk-!-margin-bottom-4",
+                children=[
+                    html.Div(
+                        className="govuk-grid-column-one-half",
+                        children=[
+                            html.Label("Select a drive", className="govuk-label"),
+                            dcc.Dropdown(
+                                id=dropdown_id,
+                                options=drive_options,
+                                clearable=False,
+                                placeholder="Choose a drive",
+                                value=drive_value,
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="govuk-grid-column-one-half",
+                        children=[
+                            html.Label("Current path", className="govuk-label"),
+                            html.Div(id=breadcrumb_id, className="govuk-body govuk-!-margin-top-1"),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(
+                id=items_container_id,
+                className="govuk-panel govuk-panel--confirmation",
+                children=html.P("Select a drive to begin browsing.", className="govuk-body"),
+            ),
+            dcc.Download(id=download_id),
+        ],
     )
 
 
@@ -280,3 +453,147 @@ def register_online_mode_callbacks(app):
         if not service or not mode:
             raise PreventUpdate
         return _build_online_mode_panel_children(service, mode, force_auth=True)
+
+    _register_sharepoint_callbacks(app)
+
+
+def _register_sharepoint_callbacks(app):
+    @app.callback(
+        Output({"type": "sharepoint-items-container", "service": MATCH, "mode": MATCH}, "children"),
+        Output({"type": "sharepoint-items-store", "service": MATCH, "mode": MATCH}, "data"),
+        Output({"type": "sharepoint-state-store", "service": MATCH, "mode": MATCH}, "data"),
+        Output({"type": "sharepoint-status", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "sharepoint-drive-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        Input(
+            {"type": "sharepoint-folder-open", "service": MATCH, "mode": MATCH, "item": ALL},
+            "n_clicks",
+        ),
+        Input(
+            {"type": "sharepoint-folder-back", "service": MATCH, "mode": MATCH},
+            "n_clicks",
+        ),
+        State({"type": "sharepoint-state-store", "service": MATCH, "mode": MATCH}, "data"),
+        State({"type": "sharepoint-items-store", "service": MATCH, "mode": MATCH}, "data"),
+        State({"type": "sharepoint-drive-store", "service": MATCH, "mode": MATCH}, "data"),
+        prevent_initial_call=True,
+    )
+    def update_sharepoint_items(
+        drive_value,
+        folder_open_clicks,
+        folder_back_clicks,
+        state_data,
+        items_cache,
+        drives_data,
+    ):
+        if not dash.callback_context.triggered:
+            raise PreventUpdate
+        trigger = dash.callback_context.triggered[0]
+        component_id = json.loads(trigger["prop_id"].split(".")[0])
+        action_type = component_id.get("type")
+        service_path = component_id.get("service")
+        mode_slug = component_id.get("mode")
+
+        state = state_data or {"drive_id": None, "drive_name": "", "breadcrumbs": []}
+        items_cache = items_cache or {"items": []}
+        drives = (drives_data or {}).get("drives", [])
+
+        if action_type == "sharepoint-drive-dropdown":
+            drive_id = drive_value
+            drive_name = next((drive.get("name") for drive in drives if drive.get("id") == drive_id), "")
+            state = {"drive_id": drive_id, "drive_name": drive_name, "breadcrumbs": []}
+            folder_id = None
+        elif action_type == "sharepoint-folder-open":
+            # Pattern-matching inputs can trigger when the list of buttons is created.
+            # Ignore those "all zeros" cases; only react to an actual click.
+            if not folder_open_clicks or max((count or 0) for count in folder_open_clicks) == 0:
+                raise PreventUpdate
+            drive_id = component_id.get("drive") or state.get("drive_id")
+            folder_id = component_id.get("item")
+            if not folder_id:
+                raise PreventUpdate
+            folder_name = _find_item_name(items_cache.get("items", []), folder_id) or "Folder"
+            breadcrumbs = state.get("breadcrumbs", [])[:]
+            breadcrumbs.append({"id": folder_id, "name": folder_name})
+            state = {
+                "drive_id": drive_id,
+                "drive_name": state.get("drive_name", ""),
+                "breadcrumbs": breadcrumbs,
+            }
+        elif action_type == "sharepoint-folder-back":
+            if not folder_back_clicks:
+                raise PreventUpdate
+            drive_id = state.get("drive_id")
+            breadcrumbs = state.get("breadcrumbs", [])[:]
+            if breadcrumbs:
+                breadcrumbs.pop()
+            folder_id = breadcrumbs[-1]["id"] if breadcrumbs else None
+            state = {
+                "drive_id": drive_id,
+                "drive_name": state.get("drive_name", ""),
+                "breadcrumbs": breadcrumbs,
+            }
+        else:
+            raise PreventUpdate
+
+        if not drive_id:
+            children = [html.P("Select a drive to begin browsing.", className="govuk-body")]
+            return children, items_cache, state, "Select a drive to continue."
+
+        success, payload = list_sharepoint_drive_items(drive_id, folder_id)
+        if not success:
+            message = f"Unable to list SharePoint contents: {payload}"
+            return [html.P(message, className="govuk-body")], items_cache, state, message
+
+        items = payload
+        children = _render_sharepoint_items_list(items, state, service_path, mode_slug)
+        message = f"Showing {len(items)} items | {_format_breadcrumbs(state)}"
+        return children, {"items": items}, state, message
+
+    @app.callback(
+        Output({"type": "sharepoint-breadcrumb", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "sharepoint-state-store", "service": MATCH, "mode": MATCH}, "data"),
+    )
+    def render_sharepoint_breadcrumbs(state_data):
+        if not state_data or not state_data.get("drive_id"):
+            return html.P("Not browsing yet.", className="govuk-body")
+        return html.P(_format_breadcrumbs(state_data), className="govuk-body govuk-!-margin-top-1")
+
+    @app.callback(
+        Output({"type": "sharepoint-folder-back", "service": MATCH, "mode": MATCH}, "disabled"),
+        Input({"type": "sharepoint-state-store", "service": MATCH, "mode": MATCH}, "data"),
+    )
+    def set_back_disabled(state_data):
+        breadcrumbs = (state_data or {}).get("breadcrumbs", [])
+        return not bool(breadcrumbs)
+
+    @app.callback(
+        Output({"type": "sharepoint-download", "service": MATCH, "mode": MATCH}, "data"),
+        Input(
+            {"type": "sharepoint-file-download", "service": MATCH, "mode": MATCH, "item": ALL},
+            "n_clicks",
+        ),
+        State({"type": "sharepoint-items-store", "service": MATCH, "mode": MATCH}, "data"),
+        State({"type": "sharepoint-state-store", "service": MATCH, "mode": MATCH}, "data"),
+        prevent_initial_call=True,
+    )
+    def download_sharepoint_file(n_clicks, items_store, state_data):
+        if not n_clicks or max((count or 0) for count in n_clicks) == 0:
+            # The callback can trigger when the list of buttons is created; don't download anything then.
+            raise PreventUpdate
+        if not dash.callback_context.triggered:
+            raise PreventUpdate
+        triggered = dash.callback_context.triggered[0]
+        component_id = json.loads(triggered["prop_id"].split(".")[0])
+        drive_id = component_id.get("drive")
+        item_id = component_id.get("item")
+        if not item_id:
+            raise PreventUpdate
+        items = items_store.get("items", []) if items_store else []
+        file_name = next((item.get("name") for item in items if item.get("id") == item_id), "download.xlsx")
+        drive_id = drive_id or (state_data or {}).get("drive_id")
+        if not drive_id:
+            raise PreventUpdate
+        success, payload = download_sharepoint_item(drive_id, item_id)
+        if not success:
+            raise PreventUpdate
+        return dcc.send_bytes(lambda buffer: buffer.write(payload), file_name)
