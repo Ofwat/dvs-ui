@@ -16,7 +16,13 @@ SHAREPOINT_HOST = os.getenv("SHAREPOINT_HOST", "blah.sharepoint.com")
 SITE_PATH = os.getenv("SHAREPOINT_SITE_PATH", "sites/*")
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 SHAREPOINT_SCOPE = "https://graph.microsoft.com/.default"
+ONELAKE_SCOPE = "https://storage.azure.com/.default"
 FABRIC_WORKSPACES_URL = "https://api.fabric.microsoft.com/v1/workspaces"
+FABRIC_LAKEHOUSES_URL = "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses"
+FABRIC_LAKEHOUSE_TABLES_URL = (
+    "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses/{lakehouse_id}/tables"
+)
+ONELAKE_LIST_PATHS_URL = "https://onelake.dfs.fabric.microsoft.com/{filesystem}"
 SHAREPOINT_DRIVE_URL = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_HOST}:/{SITE_PATH}:/drives"
 SHAREPOINT_DRIVE_ITEMS_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/root/children"
 SHAREPOINT_DRIVE_ITEM_CHILDREN_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/items/{item}/children"
@@ -94,6 +100,79 @@ def list_fabric_workspaces() -> tuple[bool, list[dict] | str]:
     return False, response.text
 
 
+def list_fabric_lakehouses(workspace_id: str) -> tuple[bool, list[dict] | str]:
+    headers = _cached_headers(FABRIC_SCOPE)
+    if not headers:
+        _acquire_token(FABRIC_SCOPE, force=True)
+        headers = _cached_headers(FABRIC_SCOPE)
+        if not headers:
+            return False, "Sign in to list Fabric lakehouses."
+    url = FABRIC_LAKEHOUSES_URL.format(workspace_id=workspace_id)
+    response = requests.get(url, headers=headers)
+    if response.ok:
+        payload = response.json()
+        return True, payload.get("value", [])
+    return False, response.text
+
+
+def list_lakehouse_tables(workspace_id: str, lakehouse_id: str) -> tuple[bool, list[dict] | str]:
+    headers = _cached_headers(FABRIC_SCOPE)
+    if not headers:
+        _acquire_token(FABRIC_SCOPE, force=True)
+        headers = _cached_headers(FABRIC_SCOPE)
+        if not headers:
+            return False, "Sign in to list Fabric lakehouse tables."
+    url = FABRIC_LAKEHOUSE_TABLES_URL.format(
+        workspace_id=workspace_id,
+        lakehouse_id=lakehouse_id,
+    )
+    response = requests.get(url, headers=headers)
+    if response.ok:
+        payload = response.json()
+        return True, payload.get("value", [])
+    return False, response.text
+
+
+def list_lakehouse_files(
+    workspace_id: str, lakehouse_id: str, directory: str = "Files"
+) -> tuple[bool, list[dict] | str]:
+    headers = _cached_headers(ONELAKE_SCOPE)
+    if not headers:
+        _acquire_token(ONELAKE_SCOPE, force=True)
+        headers = _cached_headers(ONELAKE_SCOPE)
+        if not headers:
+            return False, "Sign in to list OneLake files."
+    headers = {
+        **headers,
+        "x-ms-version": "2023-08-03",
+    }
+    url = ONELAKE_LIST_PATHS_URL.format(filesystem=workspace_id)
+    params = {
+        "resource": "filesystem",
+        "recursive": "false",
+        "directory": f"{lakehouse_id}/{directory}",
+    }
+    response = requests.get(url, headers=headers, params=params)
+    if response.ok:
+        payload = response.json()
+        paths = payload.get("paths", [])
+        items = []
+        prefix = f"{lakehouse_id}/{directory}/"
+        for entry in paths:
+            name = entry.get("name", "")
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
+            items.append(
+                {
+                    "name": name,
+                    "isDirectory": str(entry.get("isDirectory", "")).lower() == "true",
+                    "raw": entry,
+                }
+            )
+        return True, items
+    return False, response.text
+
+
 def list_sharepoint_resources() -> tuple[bool, list[dict[str, str]] | str]:
     headers = _cached_headers(SHAREPOINT_SCOPE)
     if not headers:
@@ -105,7 +184,6 @@ def list_sharepoint_resources() -> tuple[bool, list[dict[str, str]] | str]:
     if response.ok:
         payload = response.json()
         drives_payload = payload.get("value", [])
-        print(f"[DEBUG] SharePoint drives: status={response.status_code} count={len(drives_payload)}")
         drives = [
             {
                 "name": drive.get("name", "Untitled drive"),
@@ -115,7 +193,6 @@ def list_sharepoint_resources() -> tuple[bool, list[dict[str, str]] | str]:
             for drive in drives_payload
         ]
         return True, drives
-    print(f"[DEBUG] SharePoint drives failed: status={response.status_code} body={response.text[:500]}")
     return False, response.text
 
 

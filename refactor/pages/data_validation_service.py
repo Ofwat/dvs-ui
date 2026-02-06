@@ -9,6 +9,9 @@ from online_auth import (
     check_token_access,
     download_sharepoint_item,
     get_cached_access_status,
+    list_fabric_lakehouses,
+    list_fabric_workspaces,
+    list_lakehouse_files,
     list_sharepoint_drive_items,
     list_sharepoint_resources,
 )
@@ -184,7 +187,7 @@ def _build_online_mode_panel_children(service: dict, mode: dict, force_auth: boo
                 sharepoint_status = f"SharePoint drives unavailable: {drives_payload}"
 
     is_authenticated, status_message = get_cached_access_status()
-    button_text = "Authenticate" if not is_authenticated else "Refresh authentication"
+    button_text = "Authenticate SharePoint" if not is_authenticated else "Refresh SharePoint"
     button_id = {"type": "online-auth-button", "service": service["path"], "mode": mode["slug"]}
 
     children = [
@@ -221,6 +224,7 @@ def _build_online_mode_panel_children(service: dict, mode: dict, force_auth: boo
         ),
     ]
     children.append(build_sharepoint_explorer(service, mode, sharepoint_drives, sharepoint_status))
+    children.append(build_fabric_explorer(service, mode))
     return children
 
 
@@ -419,6 +423,83 @@ def build_sharepoint_explorer(
     )
 
 
+def _fabric_id(service_path: str, mode_slug: str, kind: str):
+    return {"type": f"fabric-{kind}", "service": service_path, "mode": mode_slug}
+
+
+def build_fabric_explorer(service: dict, mode: dict):
+    service_path = service["path"]
+    mode_slug = mode["slug"]
+    status_workspaces_id = _fabric_id(service_path, mode_slug, "status-workspaces")
+    status_lakehouses_id = _fabric_id(service_path, mode_slug, "status-lakehouses")
+    status_tables_id = _fabric_id(service_path, mode_slug, "status-tables")
+    load_button_id = _fabric_id(service_path, mode_slug, "load-workspaces")
+    workspace_store_id = _fabric_id(service_path, mode_slug, "workspace-store")
+    lakehouse_store_id = _fabric_id(service_path, mode_slug, "lakehouse-store")
+    file_store_id = _fabric_id(service_path, mode_slug, "file-store")
+    workspace_dropdown_id = _fabric_id(service_path, mode_slug, "workspace-dropdown")
+    lakehouse_dropdown_id = _fabric_id(service_path, mode_slug, "lakehouse-dropdown")
+    file_list_id = _fabric_id(service_path, mode_slug, "file-list")
+
+    return html.Div(
+        className="govuk-!-margin-top-6",
+        children=[
+            html.H3("Fabric explorer", className="govuk-heading-s"),
+            html.P(
+                "Authenticate Fabric to browse workspaces and lakehouses.",
+                className="govuk-body",
+            ),
+            html.Div(id=status_workspaces_id, className="govuk-body govuk-!-margin-bottom-1"),
+            html.Div(id=status_lakehouses_id, className="govuk-body govuk-!-margin-bottom-1"),
+            html.Div(id=status_tables_id, className="govuk-body govuk-!-margin-bottom-3"),
+            html.Button(
+                "Authenticate Fabric",
+                id=load_button_id,
+                n_clicks=0,
+                className="govuk-button govuk-button--secondary govuk-!-margin-bottom-3",
+                type="button",
+            ),
+            dcc.Store(id=workspace_store_id, data={"workspaces": []}),
+            dcc.Store(id=lakehouse_store_id, data={"lakehouses": []}),
+            dcc.Store(id=file_store_id, data={"files": []}),
+            html.Div(
+                className="govuk-grid-row govuk-!-margin-bottom-4",
+                children=[
+                    html.Div(
+                        className="govuk-grid-column-one-half",
+                        children=[
+                            html.Label("Workspace", className="govuk-label"),
+                            dcc.Dropdown(
+                                id=workspace_dropdown_id,
+                                options=[],
+                                placeholder="Select a workspace",
+                                clearable=False,
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="govuk-grid-column-one-half",
+                        children=[
+                            html.Label("Lakehouse", className="govuk-label"),
+                            dcc.Dropdown(
+                                id=lakehouse_dropdown_id,
+                                options=[],
+                                placeholder="Select a lakehouse",
+                                clearable=False,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(id=file_list_id, className="govuk-body"),
+            html.P(
+                "Lakehouse files are listed from OneLake (Files).",
+                className="govuk-hint",
+            ),
+        ],
+    )
+
+
 def find_service_by_path(path: str):
     for service in SERVICE_DETAIL_PAGES:
         if service["path"] == path:
@@ -455,6 +536,7 @@ def register_online_mode_callbacks(app):
         return _build_online_mode_panel_children(service, mode, force_auth=True)
 
     _register_sharepoint_callbacks(app)
+    _register_fabric_callbacks(app)
 
 
 def _register_sharepoint_callbacks(app):
@@ -597,3 +679,91 @@ def _register_sharepoint_callbacks(app):
         if not success:
             raise PreventUpdate
         return dcc.send_bytes(lambda buffer: buffer.write(payload), file_name)
+
+
+def _register_fabric_callbacks(app):
+    @app.callback(
+        Output({"type": "fabric-workspace-store", "service": MATCH, "mode": MATCH}, "data"),
+        Output({"type": "fabric-status-workspaces", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "fabric-load-workspaces", "service": MATCH, "mode": MATCH}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def load_fabric_workspaces(n_clicks):
+        success, payload = list_fabric_workspaces()
+        if not success:
+            return {"workspaces": []}, f"Workspaces unavailable: {payload}"
+        return {"workspaces": payload}, f"Loaded {len(payload)} workspaces."
+
+    @app.callback(
+        Output({"type": "fabric-workspace-dropdown", "service": MATCH, "mode": MATCH}, "options"),
+        Output({"type": "fabric-workspace-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        Input({"type": "fabric-workspace-store", "service": MATCH, "mode": MATCH}, "data"),
+        State({"type": "fabric-workspace-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        prevent_initial_call=True,
+    )
+    def update_workspace_dropdown(workspace_data, current_value):
+        if not workspace_data:
+            raise PreventUpdate
+        workspaces = workspace_data.get("workspaces", [])
+        if not workspaces:
+            return [], None
+        options = [
+            {"label": workspace.get("displayName", "Workspace"), "value": workspace.get("id")}
+            for workspace in workspaces
+        ]
+        values = [option["value"] for option in options]
+        next_value = current_value if current_value in values else values[0]
+        return options, next_value
+
+    @app.callback(
+        Output({"type": "fabric-lakehouse-store", "service": MATCH, "mode": MATCH}, "data"),
+        Output({"type": "fabric-lakehouse-dropdown", "service": MATCH, "mode": MATCH}, "options"),
+        Output({"type": "fabric-lakehouse-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        Output({"type": "fabric-status-lakehouses", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "fabric-workspace-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        prevent_initial_call=True,
+    )
+    def load_lakehouses(workspace_id):
+        if not workspace_id:
+            raise PreventUpdate
+        success, payload = list_fabric_lakehouses(workspace_id)
+        if not success:
+            return {"lakehouses": []}, [], None, f"Lakehouses unavailable: {payload}"
+        options = [
+            {"label": lakehouse.get("displayName", "Lakehouse"), "value": lakehouse.get("id")}
+            for lakehouse in payload
+        ]
+        next_value = options[0]["value"] if options else None
+        return {"lakehouses": payload}, options, next_value, f"Loaded {len(payload)} lakehouses."
+
+    @app.callback(
+        Output({"type": "fabric-file-store", "service": MATCH, "mode": MATCH}, "data"),
+        Output({"type": "fabric-file-list", "service": MATCH, "mode": MATCH}, "children"),
+        Output({"type": "fabric-status-tables", "service": MATCH, "mode": MATCH}, "children"),
+        Input({"type": "fabric-lakehouse-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        State({"type": "fabric-workspace-dropdown", "service": MATCH, "mode": MATCH}, "value"),
+        prevent_initial_call=True,
+    )
+    def load_lakehouse_files(lakehouse_id, workspace_id):
+        if not lakehouse_id or not workspace_id:
+            raise PreventUpdate
+        success, payload = list_lakehouse_files(workspace_id, lakehouse_id)
+        if not success:
+            message = f"Files unavailable: {payload}"
+            return {"files": []}, html.P(message, className="govuk-body"), message
+        files = payload
+        if not files:
+            message = "No files found in this lakehouse."
+            return {"files": []}, html.P(message, className="govuk-body"), message
+        file_list = html.Ul(
+            className="govuk-list govuk-list--bullet",
+            children=[
+                html.Li(
+                    f"{'[DIR]' if entry.get('isDirectory') else '[FILE]'} {entry.get('name', 'Item')}",
+                    className="govuk-body",
+                )
+                for entry in files
+            ],
+        )
+        message = f"Loaded {len(files)} items."
+        return {"files": files}, file_list, message
