@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local smoke test configs
+refactor/services/data_validation_api/smoke_test_submission_api.config.json
+refactor/services/data_validation_api/fabric_lakehouse_smoke_test.config.json
+refactor/services/data_validation_api/sharepoint_readonly_smoke_test.config.json
