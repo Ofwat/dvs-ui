@@ -6,3 +6,23 @@ This directory will house the refactor of `examples/plotlydash-basic`. Follow th
 1. Decide what portions of the current dashboard to carry into the refactor (layout, navigation, dqchecks wiring, assets).
 2. Sketch the desired new architecture (componentized layouts, shared utility modules, test harness).
 3. Slowly reimplement the dashboard within this folder, referencing the original code rather than modifying it directly.
+
+## data-validation-api scaffold
+
+This repo now includes a backend-first scaffold for the `data-validation-api` subsystem:
+
+- API: `refactor/services/data_validation_api/api.py`
+- CLI runner: `refactor/services/data_validation_api/runner.py`
+- Tests: `refactor/tests/services/test_data_validation_api.py`
+
+Run it from repo root:
+
+```bash
+python -m refactor.services.data_validation_api.runner --input path/to/file.csv --required-field name --required-field email
+```
+
+Run tests:
+
+```bash
+python -m unittest refactor.tests.services.test_data_validation_api
+```
