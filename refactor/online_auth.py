@@ -10,6 +10,10 @@ from urllib.parse import quote
 import requests
 from azure.identity import InteractiveBrowserCredential
 try:
+    from azure.core.exceptions import ClientAuthenticationError
+except ImportError:
+    ClientAuthenticationError = Exception  # type: ignore[assignment]
+try:
     from azure.identity import AuthenticationRecord, TokenCachePersistenceOptions
 except ImportError:
     AuthenticationRecord = None  # type: ignore[assignment]
@@ -51,9 +55,16 @@ FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 SHAREPOINT_SCOPE = "https://graph.microsoft.com/.default"
 ONELAKE_SCOPE = "https://storage.azure.com/.default"
 FABRIC_WORKSPACES_URL = "https://api.fabric.microsoft.com/v1/workspaces"
+FABRIC_PIPELINES_URL = "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/dataPipelines"
 FABRIC_LAKEHOUSES_URL = "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses"
 FABRIC_LAKEHOUSE_TABLES_URL = (
     "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses/{lakehouse_id}/tables"
+)
+FABRIC_ITEM_JOB_INSTANCES_URL = (
+    "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/items/{item_id}/jobs/instances"
+)
+FABRIC_ITEM_JOB_INSTANCE_URL = (
+    "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/items/{item_id}/jobs/instances/{job_instance_id}"
 )
 ONELAKE_LIST_PATHS_URL = "https://onelake.dfs.fabric.microsoft.com/{filesystem}"
 ONELAKE_FILE_URL = "https://onelake.dfs.fabric.microsoft.com/{filesystem}/{path}"
@@ -63,35 +74,40 @@ SHAREPOINT_DRIVE_ITEM_CHILDREN_URL = "https://graph.microsoft.com/v1.0/drives/{d
 SHAREPOINT_DRIVE_ITEM_CONTENT_URL = "https://graph.microsoft.com/v1.0/drives/{drive}/items/{item}/content"
 GROUPS_URL = "https://graph.microsoft.com/v1.0/groups"
 GROUP_DRIVE_URL = "https://graph.microsoft.com/v1.0/groups/{group_id}/drive"
+DRIVE_URL = "https://graph.microsoft.com/v1.0/drives/{drive_id}"
 SHAREPOINT_SHARE_ITEM_URL = "https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
+ME_URL = "https://graph.microsoft.com/v1.0/me"
 TOKEN_CACHE_NAME = os.getenv("AZURE_TOKEN_CACHE_NAME", "dvs-ui-token-cache")
-AUTH_RECORD_PATH = Path(
-    os.getenv(
-        "AZURE_AUTH_RECORD_PATH",
-        str(Path.home() / ".dvs-ui" / "azure-auth-record.json"),
-    )
-)
+AUTH_RECORD_PATH = Path.home() / ".dvs-ui" / "azure-auth-record.json"
 
 
-def _load_auth_record():
+def _load_auth_record() -> Any | None:
     if not AuthenticationRecord or not AUTH_RECORD_PATH.exists():
         return None
     return AuthenticationRecord.deserialize(AUTH_RECORD_PATH.read_text(encoding="utf-8"))
 
 
-def _save_auth_record(record):
+def _save_auth_record(record: Any):
     AUTH_RECORD_PATH.parent.mkdir(parents=True, exist_ok=True)
     AUTH_RECORD_PATH.write_text(record.serialize(), encoding="utf-8")
 
 
-def _build_credential() -> InteractiveBrowserCredential:
+def _clear_auth_record():
+    try:
+        AUTH_RECORD_PATH.unlink(missing_ok=True)
+    except TypeError:
+        if AUTH_RECORD_PATH.exists():
+            AUTH_RECORD_PATH.unlink()
+
+
+def _build_credential(ignore_saved_auth: bool = False) -> InteractiveBrowserCredential:
     kwargs: dict[str, Any] = {}
     if TokenCachePersistenceOptions:
         kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
             name=TOKEN_CACHE_NAME,
             allow_unencrypted_storage=True,
         )
-    auth_record = _load_auth_record()
+    auth_record = None if ignore_saved_auth else _load_auth_record()
     if auth_record is not None:
         kwargs["authentication_record"] = auth_record
     tenant_id = os.getenv("AZURE_TENANT_ID")
@@ -103,9 +119,36 @@ def _build_credential() -> InteractiveBrowserCredential:
     return InteractiveBrowserCredential(**kwargs)
 
 
-CREDENTIAL = _build_credential()
+_CREDENTIAL: InteractiveBrowserCredential | None = None
+
+
+def _get_credential(force_rebuild: bool = False, ignore_saved_auth: bool = False) -> InteractiveBrowserCredential:
+    global _CREDENTIAL
+    if _CREDENTIAL is None or force_rebuild:
+        _CREDENTIAL = _build_credential(ignore_saved_auth=ignore_saved_auth)
+    return _CREDENTIAL
+
+
+def _acquire_token(scope: str):
+    credential = _get_credential()
+    try:
+        return credential.get_token(scope)
+    except ClientAuthenticationError:
+        _clear_auth_record()
+    except Exception:
+        if _load_auth_record() is None:
+            raise
+        _clear_auth_record()
+
+    credential = _get_credential(force_rebuild=True, ignore_saved_auth=True)
+    record = credential.authenticate(scopes=[scope])
+    _save_auth_record(record)
+    credential = _get_credential(force_rebuild=True, ignore_saved_auth=False)
+    return credential.get_token(scope)
+
+
 TOKEN_MANAGER = TokenManager(
-    token_provider=lambda scope: CREDENTIAL.get_token(scope),
+    token_provider=_acquire_token,
     refresh_margin_seconds=int(os.getenv("TOKEN_REFRESH_MARGIN_SECONDS", "60")),
 )
 
@@ -142,9 +185,10 @@ def _request_with_auto_refresh(method: str, url: str, scope: str, **kwargs) -> r
 def _ensure_authenticated(scope: str):
     if not AuthenticationRecord:
         return
-    if AUTH_RECORD_PATH.exists():
+    if _load_auth_record() is not None:
         return
-    record = CREDENTIAL.authenticate(scopes=[scope])
+    credential = _get_credential(force_rebuild=True, ignore_saved_auth=True)
+    record = credential.authenticate(scopes=[scope])
     _save_auth_record(record)
 
 
@@ -164,6 +208,129 @@ def list_fabric_workspaces() -> tuple[bool, list[dict] | str]:
     if response.ok:
         payload = response.json()
         return True, payload.get("value", [])
+    return False, response.text
+
+
+def _response_json_or_text(response: requests.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        if response.text:
+            return response.text
+        return {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+        }
+
+
+def _normalize_pipeline_parameters(parameters: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not parameters:
+        return None
+    normalized: dict[str, Any] = {}
+    for key, value in parameters.items():
+        normalized[key] = value
+    return normalized
+
+
+def list_fabric_pipelines(workspace_id: str) -> tuple[bool, list[dict] | str]:
+    _ensure_authenticated(FABRIC_SCOPE)
+    url = FABRIC_PIPELINES_URL.format(workspace_id=workspace_id)
+    response = _request_with_auto_refresh("GET", url, FABRIC_SCOPE)
+    if response.ok:
+        payload = response.json()
+        return True, payload.get("value", [])
+    return False, response.text
+
+
+def trigger_fabric_pipeline(
+    workspace_id: str,
+    pipeline_id: str,
+    parameters: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any] | str]:
+    _ensure_authenticated(FABRIC_SCOPE)
+    url = FABRIC_ITEM_JOB_INSTANCES_URL.format(
+        workspace_id=workspace_id,
+        item_id=pipeline_id,
+    )
+    body: dict[str, Any] = {}
+    normalized_parameters = _normalize_pipeline_parameters(parameters)
+    if normalized_parameters:
+        body["executionData"] = {"parameters": normalized_parameters}
+    response = _request_with_auto_refresh(
+        "POST",
+        url,
+        FABRIC_SCOPE,
+        params={"jobType": "Pipeline"},
+        json=body or None,
+    )
+    if response.ok:
+        payload = _response_json_or_text(response)
+        if isinstance(payload, dict):
+            return True, payload
+        return True, {"message": payload}
+    return False, response.text
+
+
+def list_fabric_pipeline_runs(
+    workspace_id: str,
+    pipeline_id: str,
+) -> tuple[bool, list[dict] | str]:
+    _ensure_authenticated(FABRIC_SCOPE)
+    url = FABRIC_ITEM_JOB_INSTANCES_URL.format(
+        workspace_id=workspace_id,
+        item_id=pipeline_id,
+    )
+    response = _request_with_auto_refresh(
+        "GET",
+        url,
+        FABRIC_SCOPE,
+        params={"jobType": "Pipeline"},
+    )
+    if response.ok:
+        payload = response.json()
+        return True, payload.get("value", [])
+    return False, response.text
+
+
+def list_running_fabric_pipeline_runs(
+    workspace_id: str,
+    pipeline_id: str,
+) -> tuple[bool, list[dict] | str]:
+    success, payload = list_fabric_pipeline_runs(workspace_id, pipeline_id)
+    if not success:
+        return False, payload
+
+    active_statuses = {"notstarted", "queued", "inprogress", "running"}
+    active_runs = [
+        item
+        for item in payload
+        if str(item.get("status") or item.get("state") or "").strip().lower() in active_statuses
+    ]
+    return True, active_runs
+
+
+def get_fabric_pipeline_run(
+    workspace_id: str,
+    pipeline_id: str,
+    job_instance_id: str,
+) -> tuple[bool, dict[str, Any] | str]:
+    _ensure_authenticated(FABRIC_SCOPE)
+    url = FABRIC_ITEM_JOB_INSTANCE_URL.format(
+        workspace_id=workspace_id,
+        item_id=pipeline_id,
+        job_instance_id=job_instance_id,
+    )
+    response = _request_with_auto_refresh(
+        "GET",
+        url,
+        FABRIC_SCOPE,
+        params={"jobType": "Pipeline"},
+    )
+    if response.ok:
+        payload = _response_json_or_text(response)
+        if isinstance(payload, dict):
+            return True, payload
+        return True, {"message": payload}
     return False, response.text
 
 
@@ -239,12 +406,24 @@ def upload_lakehouse_file(
     headers = {"x-ms-version": "2023-08-03"}
     cleaned_directory = directory.strip("/")
     path = f"{lakehouse_id}/{cleaned_directory}/{filename}"
-    url = ONELAKE_FILE_URL.format(filesystem=workspace_id, path=quote(path))
+    return _write_lakehouse_file_bytes(workspace_id, path, content, headers)
+
+
+def _write_lakehouse_file_bytes(
+    workspace_id: str,
+    lakehouse_path: str,
+    content: bytes,
+    headers: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    effective_headers = {"x-ms-version": "2023-08-03"}
+    if headers:
+        effective_headers.update(headers)
+    url = ONELAKE_FILE_URL.format(filesystem=workspace_id, path=quote(lakehouse_path))
     create = _request_with_auto_refresh(
         "PUT",
         url,
         ONELAKE_SCOPE,
-        headers=headers,
+        headers=effective_headers,
         params={"resource": "file"},
     )
     if not create.ok:
@@ -253,7 +432,7 @@ def upload_lakehouse_file(
         "PATCH",
         url,
         ONELAKE_SCOPE,
-        headers=headers,
+        headers=effective_headers,
         params={"action": "append", "position": 0},
         data=content,
     )
@@ -263,12 +442,24 @@ def upload_lakehouse_file(
         "PATCH",
         url,
         ONELAKE_SCOPE,
-        headers=headers,
+        headers=effective_headers,
         params={"action": "flush", "position": len(content)},
     )
     if not flush.ok:
         return False, flush.text
-    return True, f"Uploaded {filename} to lakehouse."
+    return True, "Uploaded file to lakehouse."
+
+
+def write_lakehouse_file(
+    workspace_id: str,
+    lakehouse_id: str,
+    relative_path: str,
+    content: bytes,
+) -> tuple[bool, str]:
+    _ensure_authenticated(ONELAKE_SCOPE)
+    cleaned_path = relative_path.strip("/")
+    lakehouse_path = f"{lakehouse_id}/{cleaned_path}"
+    return _write_lakehouse_file_bytes(workspace_id, lakehouse_path, content)
 
 
 def download_lakehouse_file(
@@ -344,6 +535,25 @@ def list_groups() -> tuple[bool, list[dict[str, str]] | str]:
     return False, response.text
 
 
+def get_current_user() -> tuple[bool, dict[str, Any] | str]:
+    _ensure_authenticated(SHAREPOINT_SCOPE)
+    response = _request_with_auto_refresh(
+        "GET",
+        ME_URL,
+        SHAREPOINT_SCOPE,
+        params={"$select": "id,displayName,mail,userPrincipalName"},
+    )
+    if response.ok:
+        payload = response.json()
+        return True, {
+            "id": payload.get("id"),
+            "displayName": payload.get("displayName"),
+            "mail": payload.get("mail"),
+            "userPrincipalName": payload.get("userPrincipalName"),
+        }
+    return False, response.text
+
+
 def get_group_drive(group_id: str) -> tuple[bool, dict[str, str] | str]:
     _ensure_authenticated(SHAREPOINT_SCOPE)
     url = GROUP_DRIVE_URL.format(group_id=group_id)
@@ -355,6 +565,15 @@ def get_group_drive(group_id: str) -> tuple[bool, dict[str, str] | str]:
             "id": payload.get("id"),
             "webUrl": payload.get("webUrl"),
         }
+    return False, response.text
+
+
+def get_drive(drive_id: str) -> tuple[bool, dict[str, Any] | str]:
+    _ensure_authenticated(SHAREPOINT_SCOPE)
+    url = DRIVE_URL.format(drive_id=drive_id)
+    response = _request_with_auto_refresh("GET", url, SHAREPOINT_SCOPE)
+    if response.ok:
+        return True, response.json()
     return False, response.text
 
 
@@ -388,6 +607,10 @@ def list_sharepoint_drive_items(
                 "webUrl": item.get("webUrl"),
                 "createdDateTime": item.get("createdDateTime"),
                 "lastModifiedDateTime": item.get("lastModifiedDateTime"),
+                "lastModifiedBy": (
+                    item.get("lastModifiedBy", {}).get("user", {}).get("displayName")
+                    or item.get("lastModifiedBy", {}).get("application", {}).get("displayName")
+                ),
             }
             for item in payload.get("value", [])
         ]

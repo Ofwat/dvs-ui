@@ -30,44 +30,25 @@ python -m unittest refactor.tests.services.test_data_validation_api
 python -m unittest refactor.tests.services.test_submission_service
 ```
 
-Current submission service scope (small but robust):
-- Append-only submission events (in-memory store for now).
+Current submission service scope:
+- Append-only submission and run events with in-memory, local file-backed, and Fabric-backed store options.
 - `create_submission` with duplicate active guard.
 - `list_submissions` projection for current state.
 - `set_organisation_validation_flags` with idempotency and audit events.
+- Dedicated validation run API with append-only run events, projections, staging, trigger, status refresh, and finalize support.
 
-Smoke test the submission API with config:
-
-```bash
-python refactor/services/data_validation_api/smoke_test_submission_api.py --config refactor/services/data_validation_api/smoke_test_submission_api.config.json
-```
-
-Smoke test Fabric lakehouse access with config:
+Smoke test create/edit submission then trigger a validation run with config:
 
 ```bash
-python refactor/services/data_validation_api/fabric_lakehouse_smoke_test.py --config refactor/services/data_validation_api/fabric_lakehouse_smoke_test.config.json
+python refactor/services/data_validation_api/smoke_test_submission_and_run_api.py --config refactor/services/data_validation_api/smoke_test_submission_api.config.json
 ```
 
 This script:
-- Resolves workspace and lakehouse IDs from configured display names.
-- Reads lakehouse table metadata via the Fabric tables API.
-- If the lakehouse is schema-enabled and that endpoint is unsupported, it logs a warning and continues.
-- Uploads a test file into the configured OneLake `Files/...` directory.
-- Lists files in that directory.
-- Downloads the uploaded file and verifies content matches.
-
-Smoke test SharePoint access with config (read-only):
-
-```bash
-python refactor/services/data_validation_api/sharepoint_readonly_smoke_test.py --config refactor/services/data_validation_api/sharepoint_readonly_smoke_test.config.json
-```
-
-This script:
-- Resolves a configured SharePoint folder URL through Microsoft Graph.
-- Infers whether the folder belongs to a SharePoint drive or a Microsoft 365 group.
-- Lists folders and files directly under that folder.
-- Picks a random file from that folder, downloads it, and prints created/last-modified timestamps.
-- Does not perform any SharePoint write, upload, move, or delete operation.
+- creates or reuses a submission
+- edits the submission entry
+- stages selected files to local disk or Fabric depending on `storage_mode`
+- triggers a validation run and prints the resulting run detail
+- persists submission/run state to local files or Fabric paths depending on `storage_mode`
 
 Next step:
-- Add Fabric-backed adapters for event persistence and run orchestration.
+- Expand Fabric pipeline payload/status mapping and add broader integration coverage.
