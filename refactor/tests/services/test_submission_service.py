@@ -194,6 +194,36 @@ class SubmissionServiceTests(unittest.TestCase):
         assert edited.data is not None
         self.assertEqual(edited.data["note"], "Updated note")
 
+    def test_list_edit_history_returns_submission_changes_only(self):
+        service = self._service()
+        created = service.create_submission(
+            process_cd="PROC_A",
+            submission_period_cd="2026M01",
+            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+            templates={},
+            created_by="alice@example.com",
+            idempotency_key="create-1",
+            note="Initial note",
+        )
+        assert created.data is not None
+        submission_id = created.data["submission_id"]
+
+        service.edit_submission(
+            submission_id=submission_id,
+            modified_by="bob@example.com",
+            idempotency_key="edit-1",
+            note="Updated note",
+            reason="Clarify submission",
+        )
+
+        history = service.list_edit_history(submission_id=submission_id)
+
+        self.assertTrue(history.ok)
+        assert history.data is not None
+        self.assertEqual([item["event_type"] for item in history.data], ["submission_created", "submission_note_updated"])
+        self.assertEqual(history.data[-1]["actor"], "bob@example.com")
+        self.assertEqual(history.data[-1]["summary"], "Submission note updated.")
+
     def test_submission_tracks_last_modified_user_and_timestamp(self):
         timestamps = iter(
             [

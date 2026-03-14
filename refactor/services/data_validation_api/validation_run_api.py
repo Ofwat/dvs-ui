@@ -327,6 +327,49 @@ class ListRunsResult:
 
 
 @dataclass(frozen=True)
+class RunHistoryEntry:
+    run: RunSummary
+    pipeline: PipelineRef | None
+    latest_error: RunStatusError | None
+    status_history: list[dict[str, Any]]
+    result_summary: dict[str, Any] | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run": self.run.to_dict(),
+            "pipeline": self.pipeline.to_dict() if self.pipeline else None,
+            "latest_error": self.latest_error.to_dict() if self.latest_error else None,
+            "status_history": self.status_history,
+            "result_summary": self.result_summary,
+        }
+
+
+@dataclass(frozen=True)
+class ListRunHistoryRequest:
+    submission_id: str | None = None
+    state: str | None = None
+    requested_by: str | None = None
+    page: int = 1
+    page_size: int = 25
+
+
+@dataclass(frozen=True)
+class ListRunHistoryResult:
+    items: list[RunHistoryEntry]
+    page: int
+    page_size: int
+    total: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "items": [item.to_dict() for item in self.items],
+            "page": self.page,
+            "page_size": self.page_size,
+            "total": self.total,
+        }
+
+
+@dataclass(frozen=True)
 class FinalizeRunRequest:
     run_id: str
     result_payload: dict[str, Any]
@@ -660,6 +703,18 @@ class ValidationRunApi:
         end = start + request.page_size
         return ListRunsResult(items=items[start:end], page=request.page, page_size=request.page_size, total=len(items))
 
+    def list_run_history(self, request: ListRunHistoryRequest) -> ListRunHistoryResult:
+        items = [
+            self._to_run_history_entry(item)
+            for item in self._project_runs()
+            if (request.submission_id is None or item["run"]["submission_id"] == request.submission_id)
+            and (request.state is None or item["run"]["state"] == request.state)
+            and (request.requested_by is None or item["run"]["requested_by"] == request.requested_by)
+        ]
+        start = max(request.page - 1, 0) * request.page_size
+        end = start + request.page_size
+        return ListRunHistoryResult(items=items[start:end], page=request.page, page_size=request.page_size, total=len(items))
+
     def finalize_run(self, request: FinalizeRunRequest) -> FinalizeRunResult:
         projection = self._require_run_projection(request.run_id)
         asset_results = request.result_payload.get("asset_results", [])
@@ -882,6 +937,16 @@ class ValidationRunApi:
             staged_assets=[StagedAsset.from_dict(item) for item in projection["staged_assets"]],
             pipeline=PipelineRef.from_dict(projection["pipeline"]) if projection["pipeline"] else None,
             status_history=projection["status_history"],
+            result_summary=projection["result_summary"],
+        )
+
+    def _to_run_history_entry(self, projection: dict[str, Any]) -> RunHistoryEntry:
+        latest_error = projection["latest_errors"][-1] if projection["latest_errors"] else None
+        return RunHistoryEntry(
+            run=RunSummary.from_dict(projection["run"]),
+            pipeline=PipelineRef.from_dict(projection["pipeline"]) if projection["pipeline"] else None,
+            latest_error=RunStatusError.from_dict(latest_error) if latest_error else None,
+            status_history=list(projection["status_history"]),
             result_summary=projection["result_summary"],
         )
 

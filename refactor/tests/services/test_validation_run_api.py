@@ -16,6 +16,7 @@ from refactor.services.data_validation_api.validation_run_api import (
     FinalizeRunRequest,
     GetRunRequest,
     JsonlRunEventStore,
+    ListRunHistoryRequest,
     ListRunsRequest,
     PlanRunRequest,
     RefreshRunStatusRequest,
@@ -147,6 +148,7 @@ class ValidationRunApiTests(unittest.TestCase):
         )
         fetched = api.get_run(GetRunRequest(run_id=created_run.run.run_id))
         listed = api.list_runs(ListRunsRequest(submission_id=created.data["submission_id"]))
+        history = api.list_run_history(ListRunHistoryRequest(submission_id=created.data["submission_id"]))
 
         self.assertEqual(staged.state, "staged")
         self.assertEqual(len(staged.staged_assets), 2)
@@ -156,6 +158,11 @@ class ValidationRunApiTests(unittest.TestCase):
         self.assertEqual(finalized.submission_update, {"submission_id": created.data["submission_id"], "state": "validated"})
         self.assertEqual(fetched.run.state, "succeeded")
         self.assertEqual(listed.total, 1)
+        self.assertEqual(history.total, 1)
+        self.assertEqual(history.items[0].run.run_id, created_run.run.run_id)
+        self.assertEqual(history.items[0].run.state, "succeeded")
+        self.assertGreaterEqual(len(history.items[0].status_history), 4)
+        self.assertIsNotNone(history.items[0].pipeline)
         self.assertTrue(runs_events_path.exists())
         self.assertTrue(runs_projection_path.exists())
         self.assertTrue(runs_idempotency_path.exists())

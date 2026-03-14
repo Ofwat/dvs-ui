@@ -33,6 +33,8 @@ from .validation_run_api import (
     InMemoryRunEventStore,
     InMemoryValidationRunApi,
     JsonlRunEventStore,
+    ListRunHistoryRequest,
+    ListRunHistoryResult,
     ListRunsRequest,
     ListRunsResult,
     PipelineRef,
@@ -49,6 +51,7 @@ from .validation_run_api import (
     TriggerRunRequest,
     TriggerRunResult,
     RunEvent,
+    RunHistoryEntry,
     ValidationRunApi,
 )
 
@@ -77,6 +80,8 @@ __all__ = [
     "InMemoryRunEventStore",
     "InMemoryValidationRunApi",
     "JsonlRunEventStore",
+    "ListRunHistoryRequest",
+    "ListRunHistoryResult",
     "ListRunsRequest",
     "ListRunsResult",
     "PipelineRef",
@@ -97,6 +102,7 @@ __all__ = [
     "TriggerRunRequest",
     "TriggerRunResult",
     "RunEvent",
+    "RunHistoryEntry",
     "ValidationIssue",
     "ValidationResult",
     "ValidationRunApi",

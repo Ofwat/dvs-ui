@@ -12,6 +12,18 @@ from uuid import uuid4
 VALIDATION_VALIDATED = "validated"
 VALIDATION_NOT_VALIDATED = "not_validated"
 TERMINAL_STATES = {"validated", "failed"}
+SUBMISSION_EDIT_EVENT_TYPES = {
+    "submission_created",
+    "submission_template_upserted",
+    "org_flag_changed",
+    "template_flag_changed",
+    "sharepoint_hashes_refreshed",
+    "template_hashes_refreshed",
+    "submission_note_updated",
+    "submission_org_removed",
+    "submission_org_upserted",
+    "submission_template_removed",
+}
 
 
 @dataclass(frozen=True)
@@ -420,6 +432,47 @@ class ValidationServiceApi:
                 continue
             filtered.append(item)
         return self._ok(filtered)
+
+    def list_submission_history(
+        self,
+        submission_id: str,
+        actor: str | None = None,
+        include_run_events: bool = False,
+    ) -> ApiResponse:
+        projection = self._get_submission_projection(submission_id)
+        if projection is None:
+            return self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
+
+        items = []
+        for event in sorted(self._events.list_all(), key=lambda item: (item.event_ts_utc, item.event_id)):
+            if event.submission_id != submission_id:
+                continue
+            if actor and event.actor != actor:
+                continue
+            if not include_run_events and event.event_type.startswith("validation_run_"):
+                continue
+            items.append(self._submission_history_entry(event))
+        return self._ok(items)
+
+    def list_edit_history(
+        self,
+        submission_id: str,
+        actor: str | None = None,
+    ) -> ApiResponse:
+        projection = self._get_submission_projection(submission_id)
+        if projection is None:
+            return self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
+
+        items = []
+        for event in sorted(self._events.list_all(), key=lambda item: (item.event_ts_utc, item.event_id)):
+            if event.submission_id != submission_id:
+                continue
+            if actor and event.actor != actor:
+                continue
+            if event.event_type not in SUBMISSION_EDIT_EVENT_TYPES:
+                continue
+            items.append(self._submission_history_entry(event))
+        return self._ok(items)
 
     def create_submission(
         self,
@@ -1663,3 +1716,59 @@ class ValidationServiceApi:
             error=ApiError(code=code, message=message, details=details),
             correlation_id=self._id_fn(),
         )
+
+    @staticmethod
+    def _submission_history_entry(event: SubmissionEvent) -> dict[str, Any]:
+        return {
+            "event_id": event.event_id,
+            "event_ts_utc": event.event_ts_utc,
+            "event_type": event.event_type,
+            "submission_id": event.submission_id,
+            "process_cd": event.process_cd,
+            "submission_period_cd": event.submission_period_cd,
+            "organisation_cd": event.organisation_cd,
+            "actor": event.actor,
+            "reason": event.reason,
+            "validation_flag": event.validation_flag,
+            "summary": ValidationServiceApi._summarize_submission_event(event),
+            "payload": event.payload_json,
+            "sharepoint_source": event.sharepoint_source,
+        }
+
+    @staticmethod
+    def _summarize_submission_event(event: SubmissionEvent) -> str:
+        payload = event.payload_json or {}
+        if event.event_type == "submission_created":
+            return "Submission created."
+        if event.event_type == "submission_note_updated":
+            return "Submission note updated."
+        if event.event_type == "submission_org_removed":
+            return f"Organisation '{event.organisation_cd}' removed from submission."
+        if event.event_type == "submission_org_upserted":
+            return f"Organisation '{event.organisation_cd}' added or updated in submission."
+        if event.event_type == "submission_template_removed":
+            template_key = str(payload.get("template_key", "")).strip().upper()
+            return f"Template '{template_key}' removed from submission."
+        if event.event_type == "submission_template_upserted":
+            template_key = str(payload.get("template_key", "")).strip().upper()
+            return f"Template '{template_key}' added or updated in submission."
+        if event.event_type == "org_flag_changed":
+            return f"Organisation '{event.organisation_cd}' validation flag set to '{event.validation_flag}'."
+        if event.event_type == "template_flag_changed":
+            template_key = str(payload.get("template_key", "")).strip().upper()
+            return f"Template '{template_key}' validation flag set to '{event.validation_flag}'."
+        if event.event_type == "sharepoint_hashes_refreshed":
+            return f"Organisation '{event.organisation_cd}' SharePoint hashes refreshed."
+        if event.event_type == "template_hashes_refreshed":
+            template_key = str(payload.get("template_key", "")).strip().upper()
+            return f"Template '{template_key}' SharePoint hashes refreshed."
+        if event.event_type == "validation_run_started":
+            run_id = str(payload.get("run_id", "")).strip()
+            return f"Legacy validation run '{run_id}' started."
+        if event.event_type == "validation_run_org_staged":
+            run_id = str(payload.get("run_id", "")).strip()
+            return f"Legacy validation run '{run_id}' staged organisation '{event.organisation_cd}'."
+        if event.event_type == "validation_run_org_failed":
+            run_id = str(payload.get("run_id", "")).strip()
+            return f"Legacy validation run '{run_id}' failed for organisation '{event.organisation_cd}'."
+        return event.event_type
