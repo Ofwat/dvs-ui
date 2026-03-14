@@ -13,6 +13,7 @@ from common import (
     find_prefix_matches,
     load_config,
     prompt_bool,
+    prompt_service_config,
     prompt_text,
     resolve_sharepoint_folder_listing,
     resolve_actor,
@@ -131,14 +132,15 @@ def choose_match_interactively(label: str, sharepoint_context: dict[str, Any], m
 
 
 def prompt_watch_payload(sharepoint_context: dict[str, Any], *, entity_label: str, default_name: str) -> dict[str, Any]:
-    expected_path = prompt_text(
-        f"Expected file or folder path for {entity_label.lower()}",
-        default_name,
-        allow_empty=False,
-    ).strip().strip("/")
     return {
         **sharepoint_context,
-        "files": [expected_path],
+        "tracked_files": [
+            {
+                "path": None,
+                "watch": True,
+                "watch_search_term": default_name.strip().upper(),
+            }
+        ],
         "linked_item_id": str(sharepoint_context["linked_item_id"]),
         "linked_item_name": str(sharepoint_context["linked_item_name"]),
         "linked_item_is_folder": True,
@@ -470,12 +472,11 @@ def build_shared_template_submission(
 
 
 def main():
-    default_config = Path(__file__).resolve().parents[1] / "smoke_test_submission_api.config.json"
     parser = argparse.ArgumentParser(description="Authenticate and create a submission using scenario.submission from the config.")
-    parser.add_argument("--config", default=str(default_config), help="Path to a JSON config file.")
+    parser.add_argument("--config", help="Path to a JSON config file.")
     args = parser.parse_args()
 
-    config = load_config(Path(args.config))
+    config = load_config(Path(args.config)) if args.config else prompt_service_config(include_pipeline=False)
     ensure_authenticated()
 
     service = build_submission_service(config["service"])

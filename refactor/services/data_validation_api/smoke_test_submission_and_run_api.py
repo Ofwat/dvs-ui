@@ -399,12 +399,58 @@ def build_tracked_file_from_item(
 def build_missing_tracked_file(relative_path: str) -> TrackedFileRef:
     return TrackedFileRef(
         path=relative_path,
+        watch=False,
+        watch_search_term=None,
         current_hash=None,
         validated_hash=None,
         created=None,
         modified=None,
         modified_by=None,
     )
+
+
+def build_watched_tracked_file(search_term: str) -> TrackedFileRef:
+    return TrackedFileRef(
+        path=None,
+        watch=True,
+        watch_search_term=search_term.strip().upper(),
+        current_hash=None,
+        validated_hash=None,
+        created=None,
+        modified=None,
+        modified_by=None,
+    )
+
+
+def list_sharepoint_descendants(drive_id: str, parent_item_id: str, parent_relative_path: str = "") -> list[dict[str, Any]]:
+    items_ok, items_payload = list_sharepoint_drive_items(drive_id, parent_item_id)
+    require_ok("list_sharepoint_drive_items", items_ok, items_payload)
+    descendants: list[dict[str, Any]] = []
+    for item in items_payload:
+        item_name = str(item.get("name", "")).strip("/")
+        relative_path = "/".join(part for part in [parent_relative_path, item_name] if part)
+        enriched = {**item, "relativePath": relative_path}
+        descendants.append(enriched)
+        if item.get("isFolder") and item.get("id"):
+            descendants.extend(list_sharepoint_descendants(drive_id, str(item["id"]), relative_path))
+    return descendants
+
+
+def find_sharepoint_match_by_search_term(items: list[dict[str, Any]], search_term: str) -> dict[str, Any] | None:
+    normalized = search_term.strip().upper()
+    prefix_matches = [
+        item for item in items if str(item.get("name", "")).strip().upper().startswith(normalized)
+    ]
+    if prefix_matches:
+        file_matches = [item for item in prefix_matches if not item.get("isFolder")]
+        return file_matches[0] if file_matches else prefix_matches[0]
+    similar_matches = [
+        item for item in items if normalized and normalized in str(item.get("name", "")).strip().upper()
+    ]
+    if not similar_matches:
+        return None
+    file_matches = [item for item in similar_matches if not item.get("isFolder")]
+    return file_matches[0] if file_matches else similar_matches[0]
 
 
 def resolve_tracked_file(
@@ -447,9 +493,16 @@ def resolve_tracked_file(
 def resolve_sharepoint_source(payload: dict[str, Any], label: str) -> SharePointSourceRef:
     stage(f"Resolving SharePoint source for {label}")
     folder_url = payload.get("folder_url")
+    tracked_file_requests = [
+        TrackedFileRef.from_dict(item)
+        for item in payload.get("tracked_files", [])
+        if isinstance(item, (dict, str))
+    ]
     files = [str(item).strip() for item in payload.get("files", []) if str(item).strip()]
-    if not files:
-        raise RuntimeError(f"{label} must include at least one file.")
+    if not tracked_file_requests:
+        tracked_file_requests = [TrackedFileRef(path=item, watch=False, watch_search_term=None) for item in files]
+    if not tracked_file_requests:
+        raise RuntimeError(f"{label} must include at least one tracked file or watch entry.")
     drive_id = str(payload.get("drive_id") or "").strip() or None
     linked_item_id = str(payload.get("linked_item_id") or "").strip() or None
     linked_item_name = str(payload.get("linked_item_name") or "").strip() or None
@@ -490,17 +543,49 @@ def resolve_sharepoint_source(payload: dict[str, Any], label: str) -> SharePoint
         }
 
     combined_root = "/".join(part for part in [root_path, linked_item_name] if part) if linked_item_is_folder else root_path
-    tracked_files = [
-        resolve_tracked_file(
-            drive_id,
-            str(linked_item_id),
-            linked_item_name,
-            bool(linked_item_is_folder),
-            share_payload_for_resolution,
-            relative_path,
-        )
-        for relative_path in files
-    ]
+    descendants = (
+        list_sharepoint_descendants(str(drive_id), str(linked_item_id))
+        if bool(linked_item_is_folder)
+        else []
+    )
+    tracked_files: list[TrackedFileRef] = []
+    for tracked_request in tracked_file_requests:
+        if tracked_request.path:
+            tracked_files.append(
+                resolve_tracked_file(
+                    drive_id,
+                    str(linked_item_id),
+                    linked_item_name,
+                    bool(linked_item_is_folder),
+                    share_payload_for_resolution,
+                    tracked_request.path,
+                )
+            )
+            continue
+        if tracked_request.watch:
+            search_term = tracked_request.watch_search_term or label
+            matched_item = find_sharepoint_match_by_search_term(descendants, search_term)
+            if matched_item and not matched_item.get("isFolder"):
+                resolved = build_tracked_file_from_item(
+                    str(drive_id),
+                    str(matched_item["id"]),
+                    str(matched_item.get("relativePath") or matched_item.get("name") or search_term),
+                    matched_item,
+                )
+                tracked_files.append(
+                    TrackedFileRef(
+                        path=resolved.path,
+                        watch=False,
+                        watch_search_term=search_term,
+                        current_hash=resolved.current_hash,
+                        validated_hash=tracked_request.validated_hash,
+                        created=resolved.created,
+                        modified=resolved.modified,
+                        modified_by=resolved.modified_by,
+                    )
+                )
+            else:
+                tracked_files.append(build_watched_tracked_file(search_term))
     return SharePointSourceRef(
         source_type=str(source_type),
         target_name=str(target_name),
@@ -558,16 +643,21 @@ def refresh_source_hashes(source_payload: dict[str, Any]) -> dict[str, Any]:
     refreshed_source = resolve_sharepoint_source(
         {
             "folder_url": source.folder_url,
-            "files": [item.path for item in source.tracked_files],
+            "tracked_files": [item.to_dict() for item in source.tracked_files],
         },
         "REFRESH",
     )
-    validated_by_path = {item.path: item.validated_hash for item in source.tracked_files}
+    validated_by_key = {
+        (item.path or "", item.watch_search_term or ""): item.validated_hash
+        for item in source.tracked_files
+    }
     tracked_files = [
         TrackedFileRef(
             path=item.path,
+            watch=bool(item.watch),
+            watch_search_term=item.watch_search_term,
             current_hash=item.current_hash,
-            validated_hash=validated_by_path.get(item.path),
+            validated_hash=validated_by_key.get((item.path or "", item.watch_search_term or "")),
             created=item.created,
             modified=item.modified,
             modified_by=item.modified_by,

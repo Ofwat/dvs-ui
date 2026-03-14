@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from uuid import uuid4
 
 from common import (
     build_run_api,
@@ -11,15 +12,14 @@ from common import (
     load_config,
     prompt_choice_index,
     prompt_service_config,
-    prompt_text,
+    resolve_actor,
 )
-from refactor.services.data_validation_api import ListRunHistoryRequest
+from refactor.services.data_validation_api import GetRunRequest, ListRunHistoryRequest, RefreshRunStatusRequest
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Authenticate and show run history for the first available submission.")
+    parser = argparse.ArgumentParser(description="Authenticate and refresh validation run status for a selected run.")
     parser.add_argument("--config", help="Path to a JSON config file.")
-    parser.add_argument("--actor", help="Optional actor filter for run history.")
     args = parser.parse_args()
 
     config = load_config(Path(args.config)) if args.config else prompt_service_config(include_pipeline=False)
@@ -50,15 +50,38 @@ def main():
             display_key="submission_id",
             default_index=0,
         )
-        selected_actor = prompt_text("Requested by filter", args.actor or "", allow_empty=True)
         selected_submission_id = str(selected_submission["submission_id"])
         result["selected_submission_id"] = selected_submission_id
-        result["list_run_history"] = run_api.list_run_history(
-            ListRunHistoryRequest(
-                submission_id=selected_submission_id,
-                requested_by=selected_actor or None,
-            )
+        actor = resolve_actor(None)
+        result["refresh_submission_hashes"] = submission_service.refresh_submission_hashes(
+            submission_id=selected_submission_id,
+            refreshed_by=actor,
+            idempotency_key=f"refresh-submission-hashes-{uuid4().hex}",
         ).to_dict()
+
+        run_history = run_api.list_run_history(ListRunHistoryRequest(submission_id=selected_submission_id))
+        result["list_run_history"] = run_history.to_dict()
+        if run_history.items:
+            run_choices = [
+                {
+                    "run_id": item.run.run_id,
+                    "state": item.run.state,
+                    "requested_ts_utc": item.run.requested_ts_utc,
+                }
+                for item in run_history.items
+            ]
+            selected_run = prompt_choice_index(
+                "run",
+                run_choices,
+                display_key="run_id",
+                default_index=0,
+            )
+            selected_run_id = str(selected_run["run_id"])
+            result["selected_run_id"] = selected_run_id
+            result["refresh_run_status"] = run_api.refresh_run_status(
+                RefreshRunStatusRequest(run_id=selected_run_id)
+            ).to_dict()
+            result["get_run"] = run_api.get_run(GetRunRequest(run_id=selected_run_id)).to_dict()
 
     print(json.dumps(result, indent=2))
 

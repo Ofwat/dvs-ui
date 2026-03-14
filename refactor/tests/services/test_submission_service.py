@@ -24,8 +24,22 @@ class SubmissionServiceTests(unittest.TestCase):
             target_name=target_name,
             root_path="Shared Documents/Validation",
             tracked_files=[
-                TrackedFileRef(path=item, current_hash=f"hash-{index}")
+                TrackedFileRef(path=item, current_hash=f"hash-{index}", size_bytes=100 + index)
                 for index, item in enumerate(tracked_files, start=1)
+            ],
+        )
+
+    def _watch_source_ref(self, source_type: str, target_name: str, search_term: str) -> SharePointSourceRef:
+        return SharePointSourceRef(
+            source_type=source_type,
+            target_name=target_name,
+            root_path="Shared Documents/Validation",
+            tracked_files=[
+                TrackedFileRef(
+                    path=None,
+                    watch=True,
+                    watch_search_term=search_term,
+                )
             ],
         )
 
@@ -74,6 +88,7 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertEqual(created.data["organisations"]["ORG1"]["template_keys"], ["TPL_MAIN"])
         self.assertEqual(created.data["templates"]["TPL_MAIN"]["validation_flag"], VALIDATION_NOT_VALIDATED)
         self.assertEqual(created.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]["validated_hash"], None)
+        self.assertEqual(created.data["organisations"]["ORG1"]["file"]["tracked_files"][0]["size_bytes"], 101)
 
         listed = service.list_submissions(process_cd="PROC_A")
         self.assertTrue(listed.ok)
@@ -103,6 +118,24 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertFalse(second.ok)
         assert second.error is not None
         self.assertEqual(second.error.code, "DUPLICATE_ACTIVE_SUBMISSION")
+
+    def test_create_submission_accepts_watched_tracked_files(self):
+        service = self._service()
+        created = service.create_submission(
+            process_cd="PROC_A",
+            submission_period_cd="2026M01",
+            organisations={"org1": OrganisationSubmissionRef(self._watch_source_ref("drive", "Drive A", "ORG1"), ["TPL_MAIN"])},
+            templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+            created_by="alice@example.com",
+            idempotency_key="create-watch-1",
+        )
+
+        self.assertTrue(created.ok)
+        assert created.data is not None
+        tracked = created.data["organisations"]["ORG1"]["file"]["tracked_files"][0]
+        self.assertIsNone(tracked["path"])
+        self.assertTrue(tracked["watch"])
+        self.assertEqual(tracked["watch_search_term"], "ORG1")
 
     def test_set_validation_flags_updates_org_and_template_state(self):
         service = self._service()
@@ -274,6 +307,7 @@ class SubmissionServiceTests(unittest.TestCase):
                         path=item.path,
                         current_hash=f"refreshed-{call_count['value']}",
                         validated_hash=item.validated_hash,
+                        size_bytes=500 + call_count["value"],
                     )
                     for item in source.tracked_files
                 ],
@@ -311,6 +345,70 @@ class SubmissionServiceTests(unittest.TestCase):
             refreshed.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]["current_hash"],
             "refreshed-2",
         )
+        self.assertEqual(
+            refreshed.data["organisations"]["ORG1"]["file"]["tracked_files"][0]["size_bytes"],
+            501,
+        )
+        self.assertEqual(
+            refreshed.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]["size_bytes"],
+            502,
+        )
+
+    def test_refresh_submission_hashes_can_resolve_watched_file(self):
+        def refresh_resolver(source_payload: dict[str, object]) -> dict[str, object]:
+            source = SharePointSourceRef.from_dict(source_payload)
+            tracked_files = []
+            for item in source.tracked_files:
+                if item.watch:
+                    tracked_files.append(
+                        TrackedFileRef(
+                            path="resolved/ORG1.xlsx",
+                            watch=False,
+                            watch_search_term=item.watch_search_term,
+                            current_hash="resolved-hash",
+                            validated_hash=item.validated_hash,
+                            size_bytes=777,
+                        )
+                    )
+                else:
+                    tracked_files.append(item)
+            return SharePointSourceRef(
+                source_type=source.source_type,
+                target_name=source.target_name,
+                root_path=source.root_path,
+                tracked_files=tracked_files,
+                folder_url=source.folder_url,
+            ).to_dict()
+
+        service = ValidationServiceApi(
+            workspace_id="ws-1",
+            submissions_registry_path="Files/validation-service/events/submission_events.jsonl",
+            sharepoint_hash_resolver=refresh_resolver,
+        )
+        created = service.create_submission(
+            process_cd="PROC_A",
+            submission_period_cd="2026M01",
+            organisations={"org1": OrganisationSubmissionRef(self._watch_source_ref("drive", "Drive A", "ORG1"), [])},
+            templates={},
+            created_by="alice@example.com",
+            idempotency_key="create-watch-refresh-1",
+        )
+        assert created.data is not None
+
+        refreshed = service.refresh_submission_hashes(
+            submission_id=created.data["submission_id"],
+            refreshed_by="carol@example.com",
+            idempotency_key="refresh-watch-1",
+        )
+
+        self.assertTrue(refreshed.ok)
+        assert refreshed.data is not None
+        tracked = refreshed.data["organisations"]["ORG1"]["file"]["tracked_files"][0]
+        self.assertEqual(tracked["path"], "resolved/ORG1.xlsx")
+        self.assertFalse(tracked["watch"])
+        self.assertEqual(tracked["watch_search_term"], "ORG1")
+        self.assertEqual(tracked["current_hash"], "resolved-hash")
+        self.assertEqual(tracked["size_bytes"], 777)
 
     def test_file_backed_store_persists_events_and_projection(self):
         temp_dir = Path(tempfile.mkdtemp(prefix="submission-service-"))

@@ -54,9 +54,12 @@ class ApiResponse:
 
 @dataclass(frozen=True)
 class TrackedFileRef:
-    path: str
+    path: str | None
+    watch: bool = False
+    watch_search_term: str | None = None
     current_hash: str | None = None
     validated_hash: str | None = None
+    size_bytes: int | None = None
     created: str | None = None
     modified: str | None = None
     modified_by: str | None = None
@@ -69,9 +72,12 @@ class TrackedFileRef:
         if isinstance(payload, str):
             return cls(path=payload.strip())
         return cls(
-            path=str(payload["path"]).strip(),
+            path=str(payload["path"]).strip() if payload.get("path") else None,
+            watch=bool(payload.get("watch", False)),
+            watch_search_term=str(payload["watch_search_term"]).strip() if payload.get("watch_search_term") else None,
             current_hash=str(payload["current_hash"]).strip() if payload.get("current_hash") else None,
             validated_hash=str(payload["validated_hash"]).strip() if payload.get("validated_hash") else None,
+            size_bytes=int(payload["size_bytes"]) if payload.get("size_bytes") is not None else None,
             created=str(payload["created"]).strip() if payload.get("created") else None,
             modified=str(payload["modified"]).strip() if payload.get("modified") else None,
             modified_by=str(payload["modified_by"]).strip() if payload.get("modified_by") else None,
@@ -114,7 +120,7 @@ class SharePointSourceRef:
                 for item in payload.get("tracked_files", [])
                 if (
                     isinstance(item, dict)
-                    and str(item.get("path", "")).strip()
+                    and (str(item.get("path", "")).strip() or bool(item.get("watch")))
                 ) or (isinstance(item, str) and item.strip())
             ],
             folder_url=str(payload["folder_url"]).strip() if payload.get("folder_url") else None,
@@ -1548,15 +1554,18 @@ class ValidationServiceApi:
             root_path=normalized.root_path.strip(),
             tracked_files=[
                 TrackedFileRef(
-                    path=item.path.strip(),
+                    path=item.path.strip() if item.path else None,
+                    watch=bool(item.watch),
+                    watch_search_term=item.watch_search_term.strip() if item.watch_search_term else None,
                     current_hash=item.current_hash.strip() if item.current_hash else None,
                     validated_hash=item.validated_hash.strip() if item.validated_hash else None,
+                    size_bytes=item.size_bytes,
                     created=item.created.strip() if item.created else None,
                     modified=item.modified.strip() if item.modified else None,
                     modified_by=item.modified_by.strip() if item.modified_by else None,
                 )
                 for item in normalized.tracked_files
-                if item.path.strip()
+                if (item.path and item.path.strip()) or item.watch
             ],
             folder_url=normalized.folder_url.strip() if normalized.folder_url else None,
             drive_id=normalized.drive_id.strip() if normalized.drive_id else None,
@@ -1572,7 +1581,10 @@ class ValidationServiceApi:
             and bool(source.target_name)
             and bool(source.root_path)
             and bool(source.tracked_files)
-            and all(item.path for item in source.tracked_files)
+            and all(
+                (item.path and item.path.strip()) or (item.watch and item.watch_search_term and item.watch_search_term.strip())
+                for item in source.tracked_files
+            )
         )
 
     @classmethod
@@ -1656,8 +1668,11 @@ class ValidationServiceApi:
         tracked_files = [
             TrackedFileRef(
                 path=item.path,
+                watch=item.watch,
+                watch_search_term=item.watch_search_term,
                 current_hash=item.current_hash,
                 validated_hash=item.current_hash if validation_flag == VALIDATION_VALIDATED else None,
+                size_bytes=item.size_bytes,
                 created=item.created,
                 modified=item.modified,
                 modified_by=item.modified_by,

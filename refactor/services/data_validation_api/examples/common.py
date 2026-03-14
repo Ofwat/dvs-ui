@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import sys
 from typing import Any
+from uuid import UUID
+import hashlib
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
 if str(ROOT_DIR) not in sys.path:
@@ -12,9 +14,13 @@ if str(ROOT_DIR) not in sys.path:
 from refactor.online_auth import (  # noqa: E402
     check_token_access,
     download_lakehouse_file,
+    download_sharepoint_item,
+    get_fabric_pipeline_run,
     get_drive,
     get_current_user,
     list_fabric_lakehouses,
+    list_fabric_pipeline_runs,
+    list_fabric_pipelines,
     list_sharepoint_drive_items,
     list_fabric_workspaces,
     resolve_sharepoint_share_url,
@@ -66,6 +72,20 @@ def parse_optional_text(payload: bytes | str) -> str | None:
     if '"code":"PathNotFound"' in payload or '"code":"BlobNotFound"' in payload:
         return None
     raise RuntimeError(payload)
+
+
+def is_guid(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return True
+
+
+def hash_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def resolve_actor(explicit_actor: str | None) -> str:
@@ -134,13 +154,61 @@ def prompt_choice_index(label: str, items: list[dict[str, Any]], *, display_key:
         raise RuntimeError(f"No items available for {label}.")
     print(f"\nAvailable {label}:")
     for index, item in enumerate(items, start=1):
-        value = item.get(display_key) or item
+        if "_display" in item:
+            value = item["_display"]
+        else:
+            value = item.get(display_key) or item
         print(f"  {index}. {value}")
     raw = prompt_text(f"Select {label} number", str(default_index + 1), allow_empty=False)
     choice_index = int(raw) - 1
     if choice_index < 0 or choice_index >= len(items):
         raise RuntimeError(f"Invalid {label} selection '{raw}'.")
     return items[choice_index]
+
+
+def prompt_service_config(*, include_pipeline: bool = False) -> dict[str, Any]:
+    service = {
+        "storage_mode": "fabric",
+        "workspace_display_name": prompt_text("Service workspace display name", allow_empty=False),
+        "lakehouse_display_name": prompt_text("Service lakehouse display name", allow_empty=False),
+        "submissions_events_path": prompt_text(
+            "Submissions events path",
+            "Files/validation-service/events/submission_events.jsonl",
+            allow_empty=False,
+        ),
+        "submissions_projection_path": prompt_text(
+            "Submissions projection path",
+            "Files/validation-service/projections/submissions_current.json",
+            allow_empty=False,
+        ),
+        "idempotency_path": prompt_text(
+            "Submission idempotency path",
+            "Files/validation-service/system/idempotency.json",
+            allow_empty=False,
+        ),
+        "runs_events_path": prompt_text(
+            "Runs events path",
+            "Files/validation-service/events/run_events.jsonl",
+            allow_empty=False,
+        ),
+        "runs_projection_path": prompt_text(
+            "Runs projection path",
+            "Files/validation-service/projections/runs_current.json",
+            allow_empty=False,
+        ),
+        "runs_idempotency_path": prompt_text(
+            "Run idempotency path",
+            "Files/validation-service/system/run_idempotency.json",
+            allow_empty=False,
+        ),
+    }
+    pipeline: dict[str, Any] = {}
+    if include_pipeline:
+        pipeline = {
+            "workspace_display_name": prompt_text("Pipeline workspace display name", allow_empty=False),
+            "pipeline_display_name": prompt_text("Pipeline display name", allow_empty=False),
+        }
+    return {"service": service, "pipeline": pipeline, "scenario": {"submission": {}}}
 
 
 def _list_sharepoint_descendants(
@@ -202,6 +270,143 @@ def resolve_sharepoint_folder_listing(share_url: str) -> tuple[dict[str, Any], l
     return context, list(items_payload)
 
 
+def extract_item_modified_by(item_payload: dict[str, Any]) -> str | None:
+    last_modified_by = item_payload.get("lastModifiedBy", {})
+    if isinstance(last_modified_by, dict):
+        user = last_modified_by.get("user", {})
+        if isinstance(user, dict) and user.get("displayName"):
+            return str(user["displayName"])
+        application = last_modified_by.get("application", {})
+        if isinstance(application, dict) and application.get("displayName"):
+            return str(application["displayName"])
+    if item_payload.get("lastModifiedBy"):
+        return str(item_payload["lastModifiedBy"])
+    return None
+
+
+def _build_tracked_file_from_item(drive_id: str, item_id: str, relative_path: str, item_payload: dict[str, Any] | None = None) -> TrackedFileRef:
+    file_ok, file_payload = download_sharepoint_item(drive_id, item_id)
+    require_ok("download_sharepoint_item", file_ok, file_payload)
+    metadata = item_payload or {}
+    return TrackedFileRef(
+        path=relative_path,
+        watch=False,
+        watch_search_term=None,
+        current_hash=hash_bytes(file_payload),
+        validated_hash=None,
+        size_bytes=len(file_payload),
+        created=str(metadata.get("createdDateTime")).strip() if metadata.get("createdDateTime") else None,
+        modified=str(metadata.get("lastModifiedDateTime")).strip() if metadata.get("lastModifiedDateTime") else None,
+        modified_by=extract_item_modified_by(metadata),
+    )
+
+
+def refresh_source_hashes(source_payload: dict[str, Any]) -> dict[str, Any]:
+    source = SharePointSourceRef.from_dict(source_payload)
+    if not source.folder_url:
+        raise RuntimeError("Cannot refresh SharePoint hashes without folder_url in the stored source payload.")
+
+    context, items = resolve_sharepoint_folder_listing(source.folder_url)
+    item_by_path = {
+        str(item.get("relativePath") or item.get("name") or "").strip("/"): item
+        for item in items
+    }
+    validated_by_key = {
+        (item.path or "", item.watch_search_term or ""): item.validated_hash
+        for item in source.tracked_files
+    }
+
+    tracked_files: list[TrackedFileRef] = []
+    for tracked in source.tracked_files:
+        if tracked.path:
+            matched_item = item_by_path.get(tracked.path.strip("/"))
+            if matched_item and not matched_item.get("isFolder"):
+                resolved = _build_tracked_file_from_item(
+                    str(context["drive_id"]),
+                    str(matched_item["id"]),
+                    str(matched_item.get("relativePath") or matched_item.get("name") or tracked.path),
+                    matched_item,
+                )
+                tracked_files.append(
+                    TrackedFileRef(
+                        path=resolved.path,
+                        watch=False,
+                        watch_search_term=tracked.watch_search_term,
+                        current_hash=resolved.current_hash,
+                        validated_hash=validated_by_key.get((tracked.path or "", tracked.watch_search_term or "")),
+                        size_bytes=resolved.size_bytes,
+                        created=resolved.created,
+                        modified=resolved.modified,
+                        modified_by=resolved.modified_by,
+                    )
+                )
+            else:
+                tracked_files.append(
+                    TrackedFileRef(
+                        path=tracked.path,
+                        watch=tracked.watch,
+                        watch_search_term=tracked.watch_search_term,
+                        current_hash=None,
+                        validated_hash=validated_by_key.get((tracked.path or "", tracked.watch_search_term or "")),
+                        size_bytes=None,
+                        created=None,
+                        modified=None,
+                        modified_by=None,
+                    )
+                )
+            continue
+
+        if tracked.watch:
+            search_term = tracked.watch_search_term or ""
+            matched_item = find_sharepoint_match_by_search_term(items, search_term)
+            if matched_item and not matched_item.get("isFolder"):
+                resolved = _build_tracked_file_from_item(
+                    str(context["drive_id"]),
+                    str(matched_item["id"]),
+                    str(matched_item.get("relativePath") or matched_item.get("name") or search_term),
+                    matched_item,
+                )
+                tracked_files.append(
+                    TrackedFileRef(
+                        path=resolved.path,
+                        watch=False,
+                        watch_search_term=search_term,
+                        current_hash=resolved.current_hash,
+                        validated_hash=validated_by_key.get(("", search_term)),
+                        size_bytes=resolved.size_bytes,
+                        created=resolved.created,
+                        modified=resolved.modified,
+                        modified_by=resolved.modified_by,
+                    )
+                )
+            else:
+                tracked_files.append(
+                    TrackedFileRef(
+                        path=None,
+                        watch=True,
+                        watch_search_term=search_term,
+                        current_hash=None,
+                        validated_hash=validated_by_key.get(("", search_term)),
+                        size_bytes=None,
+                        created=None,
+                        modified=None,
+                        modified_by=None,
+                    )
+                )
+
+    return SharePointSourceRef(
+        source_type=source.source_type,
+        target_name=source.target_name,
+        root_path=source.root_path,
+        tracked_files=tracked_files,
+        folder_url=source.folder_url,
+        drive_id=source.drive_id,
+        linked_item_id=source.linked_item_id,
+        linked_item_name=source.linked_item_name,
+        linked_item_is_folder=source.linked_item_is_folder,
+    ).to_dict()
+
+
 def find_prefix_matches(items: list[dict[str, Any]], prefix: str) -> dict[str, Any]:
     normalized_prefix = prefix.strip().upper()
     matches = [
@@ -221,7 +426,13 @@ def find_prefix_matches(items: list[dict[str, Any]], prefix: str) -> dict[str, A
 
 
 def build_sharepoint_source(payload: dict[str, Any]) -> SharePointSourceRef:
+    tracked_file_payloads = payload.get("tracked_files")
     files = [str(item).strip() for item in payload.get("files", []) if str(item).strip()]
+    tracked_files = (
+        [TrackedFileRef.from_dict(item) for item in tracked_file_payloads if isinstance(item, (dict, str))]
+        if tracked_file_payloads is not None
+        else [TrackedFileRef(path=path, watch=False, watch_search_term=None) for path in files]
+    )
     folder_url = str(payload.get("folder_url")).strip() if payload.get("folder_url") else None
     source_type = str(payload.get("source_type", "")).strip()
     target_name = str(payload.get("target_name", "")).strip()
@@ -249,11 +460,34 @@ def build_sharepoint_source(payload: dict[str, Any]) -> SharePointSourceRef:
         if linked_item_is_folder is None:
             linked_item_is_folder = bool(resolved.get("folder"))
 
+    if tracked_file_payloads is None and folder_url and drive_id and linked_item_id and linked_item_is_folder:
+        descendants = _list_sharepoint_descendants(str(drive_id), str(linked_item_id))
+        items_by_path = {
+            str(item.get("relativePath") or item.get("name") or "").strip("/"): item
+            for item in descendants
+        }
+        enriched_tracked_files: list[TrackedFileRef] = []
+        for tracked in tracked_files:
+            tracked_path = str(tracked.path or "").strip("/")
+            matched_item = items_by_path.get(tracked_path)
+            if matched_item and not matched_item.get("isFolder") and matched_item.get("id"):
+                enriched_tracked_files.append(
+                    _build_tracked_file_from_item(
+                        str(drive_id),
+                        str(matched_item["id"]),
+                        str(matched_item.get("relativePath") or matched_item.get("name") or tracked_path),
+                        matched_item,
+                    )
+                )
+            else:
+                enriched_tracked_files.append(tracked)
+        tracked_files = enriched_tracked_files
+
     return SharePointSourceRef(
         source_type=source_type,
         target_name=target_name,
         root_path=root_path,
-        tracked_files=[TrackedFileRef(path=path) for path in files],
+        tracked_files=tracked_files,
         folder_url=folder_url,
         drive_id=drive_id,
         linked_item_id=linked_item_id,
@@ -330,14 +564,73 @@ def build_submission_service(config: dict[str, Any]) -> ValidationServiceApi:
         submissions_projection_store=TextBackedProjectionStore(
             write_text=lambda content: write_text(str(config["submissions_projection_path"]), content),
         ),
+        sharepoint_hash_resolver=refresh_source_hashes,
     )
 
 
 def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
-    _, read_text, write_text = build_storage_context(config)
-    runs_events_path = str(config.get("runs_events_path", "Files/validation-service/events/run_events.jsonl"))
-    runs_projection_path = str(config.get("runs_projection_path", "Files/validation-service/projections/runs_current.json"))
-    runs_idempotency_path = str(config.get("runs_idempotency_path", "Files/validation-service/system/run_idempotency.json"))
+    service_config = config.get("service", config)
+    _, read_text, write_text = build_storage_context(service_config)
+    runs_events_path = str(service_config.get("runs_events_path", "Files/validation-service/events/run_events.jsonl"))
+    runs_projection_path = str(service_config.get("runs_projection_path", "Files/validation-service/projections/runs_current.json"))
+    runs_idempotency_path = str(service_config.get("runs_idempotency_path", "Files/validation-service/system/run_idempotency.json"))
+
+    pipeline_config = config.get("pipeline", {})
+    pipeline_workspace_id = None
+    pipeline_id = None
+    pipeline_workspace_name = str(pipeline_config.get("workspace_display_name", "")).strip()
+    pipeline_display_name = str(pipeline_config.get("pipeline_display_name", "")).strip()
+    if pipeline_workspace_name and pipeline_display_name:
+        workspaces_ok, workspaces_payload = list_fabric_workspaces()
+        require_ok("list_fabric_workspaces", workspaces_ok, workspaces_payload)
+        pipeline_workspace = find_by_display_name(workspaces_payload, pipeline_workspace_name, "Pipeline workspace")
+        pipeline_workspace_id = str(pipeline_workspace["id"])
+        pipelines_ok, pipelines_payload = list_fabric_pipelines(pipeline_workspace_id)
+        require_ok("list_fabric_pipelines", pipelines_ok, pipelines_payload)
+        pipeline = find_by_display_name(pipelines_payload, pipeline_display_name, "Pipeline")
+        pipeline_id = str(pipeline["id"])
+
+    def resolve_pipeline_run_id(fallback_run_id: str) -> str:
+        if not pipeline_workspace_id or not pipeline_id:
+            return ""
+        runs_ok, runs_payload = list_fabric_pipeline_runs(pipeline_workspace_id, pipeline_id)
+        require_ok("list_fabric_pipeline_runs", runs_ok, runs_payload)
+        if not runs_payload:
+            return ""
+        latest = runs_payload[0]
+        candidate = latest.get("id") or latest.get("jobInstanceId") or latest.get("jobId") or latest.get("runId")
+        candidate_value = str(candidate).strip() if candidate is not None else ""
+        return candidate_value if is_guid(candidate_value) else ""
+
+    def pipeline_status_resolver(pipeline: Any, projection: dict[str, Any]):
+        if not pipeline_workspace_id or not pipeline_id:
+            return {"status": projection["run"]["state"]}
+        pipeline_run_id = str(pipeline.pipeline_run_id or "").strip()
+        if pipeline_run_id.lower() == "none":
+            pipeline_run_id = ""
+        if not is_guid(pipeline_run_id):
+            pipeline_run_id = resolve_pipeline_run_id(str(projection["run"]["run_id"]))
+            if not is_guid(pipeline_run_id):
+                return {"status": "running"}
+        success, response_payload = get_fabric_pipeline_run(
+            pipeline_workspace_id,
+            str(pipeline.pipeline_id or pipeline_id),
+            pipeline_run_id,
+        )
+        if not success and "JobInstanceNotFound" in str(response_payload):
+            resolved_run_id = resolve_pipeline_run_id(str(projection["run"]["run_id"]))
+            if not is_guid(resolved_run_id):
+                return {"status": "running"}
+            success, response_payload = get_fabric_pipeline_run(
+                pipeline_workspace_id,
+                str(pipeline.pipeline_id or pipeline_id),
+                resolved_run_id,
+            )
+        require_ok("get_fabric_pipeline_run", success, response_payload)
+        return {
+            "status": str(response_payload.get("status") or response_payload.get("state") or "running").lower(),
+            "error": response_payload.get("failureReason"),
+        }
 
     return ValidationRunApi(
         submission_resolver=lambda _submission_id: None,
@@ -352,4 +645,5 @@ def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
         runs_projection_store=TextBackedProjectionStore(
             write_text=lambda content: write_text(runs_projection_path, content),
         ),
+        pipeline_status_resolver=pipeline_status_resolver,
     )
