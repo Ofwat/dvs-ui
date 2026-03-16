@@ -1,23 +1,89 @@
-# Current Public API
+# Current API Contract
 
-This document describes the public-facing Python service API that is implemented today under `refactor.services.data_validation_api`.
+This document describes the transport-agnostic Python application API implemented under `refactor.services.data_validation_api`.
 
-It is intentionally a "what exists now" document, not a target-state design doc.
+The target contract is reusable from:
+- GUI
+- CLI
+- automation scripts
 
-## Main Service Objects
+It is not an HTTP contract and not a GUI-specific facade.
 
-The current backend surface is split across two main classes:
+## Layers
+
+### Stable application APIs
 
 - `ValidationServiceApi` in [submission_service.py](submission_service.py)
 - `ValidationRunApi` in [validation_run_api.py](validation_run_api.py)
 
-`ValidationServiceApi` owns submission lifecycle and submission-level validation flags.
+### Internal workflow helpers
 
-`ValidationRunApi` owns validation run lifecycle, staging, triggering, polling, and finalization.
+- `workflows.py` in [workflows.py](workflows.py)
+
+These helpers are intentionally transport-agnostic and are used to keep CLI/example code thin. They are internal reusable orchestration helpers, not the primary stable contract.
+
+### Client adapters
+
+The scripts under [examples](examples) are example clients of the stable APIs and workflow helpers. They should not be treated as the source of truth for domain behavior.
+
+## Behavioral Rules
+
+### Canonical run states
+
+Active states:
+- `queued`
+- `staged`
+- `running`
+
+Terminal states:
+- `succeeded`
+- `failed`
+- `cancelled`
+- `partially_succeeded`
+
+External aliases are normalized internally. Public callers should only rely on the canonical states above.
+
+### Explicit validation rule
+
+Successful pipeline completion does not automatically mark submission files as validated.
+
+Tracked file fields:
+- `validated_hash`
+- `validation_run_id`
+
+remain `null` until validation is applied explicitly via:
+- `ValidationServiceApi.set_validation_flags(...)`
+- `ValidationRunApi.finalize_run(..., apply_validation_flags=True)`
+
+### Watched files
+
+Tracked file entries always carry:
+- `watch`
+- `path`
+- `watch_search_term` when relevant
+
+Rules:
+- `refresh_submission_hashes(...)` is responsible for recomputing SharePoint file metadata and resolving watched files when they appear.
+- run methods operate on the current stored submission state
+- unresolved watched files must not silently pass run staging
+
+## Stable Application APIs
 
 ## `ValidationServiceApi`
 
-### `list_submissions(...) -> ApiResponse`
+Uses typed request/result dataclasses.
+
+Stable result rule:
+- every stable result includes `ok` and `error`
+- recoverable failures are returned in `error`, not raised as raw public exceptions
+
+Common public error shape:
+- `OperationError`
+  - `code: str`
+  - `message: str`
+  - `details: dict[str, Any] | None`
+
+### `list_submissions(request: ListSubmissionsRequest) -> ListSubmissionsResult`
 
 Filters current submission projections.
 
@@ -27,12 +93,9 @@ Parameters:
 - `state: str | None = None`
 - `created_by: str | None = None`
 
-Returns:
-- `ApiResponse.data` containing a list of submission projections.
+### `create_submission(request: CreateSubmissionRequest) -> SubmissionMutationResult`
 
-### `create_submission(...) -> ApiResponse`
-
-Creates a new submission with organisation files and optional template files.
+Creates a new submission.
 
 Parameters:
 - `process_cd: str`
@@ -44,347 +107,197 @@ Parameters:
 - `note: str | None = None`
 - `allow_duplicate_active: bool = False`
 
-Returns:
-- `ApiResponse.data` containing the created submission projection.
+### `edit_submission(request: EditSubmissionRequest) -> SubmissionMutationResult`
 
-### `edit_submission(...) -> ApiResponse`
+Updates an existing submission.
 
-Updates an existing submission by upserting/removing organisations or templates, and optionally updating the note.
+Editable fields:
+- note
+- organisation upserts/removals
+- template upserts/removals
+- organisation validation flags
+- template validation flags
 
-Parameters:
-- `submission_id: str`
-- `modified_by: str`
-- `idempotency_key: str`
-- `organisation_upserts: dict[str, dict | OrganisationSubmissionRef | SharePointSourceRef] | None = None`
-- `organisation_removals: list[str] | None = None`
-- `template_upserts: dict[str, dict | TemplateSubmissionRef] | None = None`
-- `template_removals: list[str] | None = None`
-- `note: str | None = None`
-- `reason: str | None = None`
+Identity fields are not editable:
+- `process_cd`
+- `submission_period_cd`
 
-Returns:
-- `ApiResponse.data` containing the updated submission projection.
+### `refresh_submission_hashes(request: RefreshSubmissionRequest) -> SubmissionMutationResult`
 
-### `refresh_submission_hashes(...) -> ApiResponse`
+Refreshes SharePoint-backed file metadata for a submission.
 
-Refreshes SharePoint hashes and metadata for all organisations and templates in a submission.
-
-Parameters:
-- `submission_id: str`
-- `refreshed_by: str`
-- `idempotency_key: str`
-
-Returns:
-- `ApiResponse.data` containing the refreshed submission projection.
+Responsibilities:
+- recompute `current_hash`
+- recompute `size_bytes`
+- refresh `created`, `modified`, `modified_by`
+- resolve watched files when they appear
 
 Requires:
-- `sharepoint_hash_resolver` configured on the service instance.
+- `sharepoint_hash_resolver`
 
-### `set_validation_flags(...) -> ApiResponse`
+### `set_validation_flags(request: SetValidationFlagsRequest) -> SubmissionMutationResult`
 
-Sets validation flags for organisations and/or templates in a submission.
+Applies explicit validation flags to organisations and/or templates.
 
-Parameters:
-- `submission_id: str`
-- `organisation_changes: dict[str, str] | None`
-- `template_changes: dict[str, str] | None`
-- `modified_by: str`
-- `idempotency_key: str`
-- `reason: str | None = None`
-
-Returns:
-- `ApiResponse.data` containing the updated submission projection.
-
-Supported flags today:
+Supported flags:
 - `validated`
 - `not_validated`
 
-### `set_organisation_validation_flags(...) -> ApiResponse`
+### `set_organisation_validation_flags(...) -> SubmissionMutationResult`
 
-Convenience wrapper over `set_validation_flags(...)` for organisation-only updates.
+Convenience wrapper for organisation-only explicit validation changes.
 
-Parameters:
-- `submission_id: str`
-- `changes: dict[str, str]`
-- `modified_by: str`
-- `idempotency_key: str`
-- `reason: str | None = None`
+### `set_template_validation_flags(...) -> SubmissionMutationResult`
 
-### `set_template_validation_flags(...) -> ApiResponse`
+Convenience wrapper for template-only explicit validation changes.
 
-Convenience wrapper over `set_validation_flags(...)` for template-only updates.
+### `list_submission_history(request: ListSubmissionHistoryRequest) -> ListSubmissionHistoryResult`
 
-Parameters:
-- `submission_id: str`
-- `changes: dict[str, str]`
-- `modified_by: str`
-- `idempotency_key: str`
-- `reason: str | None = None`
+Lists normalized submission events for a single submission.
 
-### `list_submission_history(...) -> ApiResponse`
-
-Lists submission events for a single submission.
-
-Parameters:
-- `submission_id: str`
-- `actor: str | None = None`
-- `include_run_events: bool = False`
-
-Returns:
-- `ApiResponse.data` containing normalized event entries with timestamps, actor, summary, payload, and source details.
-
-### `list_edit_history(...) -> ApiResponse`
+### `list_edit_history(request: ListEditHistoryRequest) -> ListEditHistoryResult`
 
 Lists submission edit events only for a single submission.
 
-Parameters:
-- `submission_id: str`
-- `actor: str | None = None`
-
-Returns:
-- `ApiResponse.data` containing normalized edit-history entries.
-
-### `list_runs(...) -> ApiResponse`
-
-Legacy run projection listing exposed from the submission service.
-
-Parameters:
-- `submission_id: str | None = None`
-- `state: str | None = None`
-- `started_by: str | None = None`
-
-Returns:
-- `ApiResponse.data` containing legacy run projections built from submission events.
-
-Status:
-- Still implemented.
-- Superseded by `ValidationRunApi.list_runs(...)` for new run handling.
-
-### `start_validation_run(...) -> ApiResponse`
-
-Legacy run-start method on the submission service.
-
-Parameters:
-- `submission_id: str`
-- `requested_org_files: dict[str, list[str] | None] | None`
-- `started_by: str`
-- `idempotency_key: str`
-- `refresh_hashes: bool = True`
-
-Returns:
-- `ApiResponse.data` containing the legacy run projection.
-
-Status:
-- Still implemented for backward compatibility.
-- New work should prefer `ValidationRunApi`.
-
 ## `ValidationRunApi`
 
-The run API uses typed request/result dataclasses rather than `ApiResponse`.
+Uses typed request/result dataclasses with the same stable envelope:
+- `ok: bool`
+- `error: OperationError | None`
 
-## Planning
+### Planning
 
-### `plan_run(request: PlanRunRequest) -> PlanRunResult`
+#### `plan_run(request: PlanRunRequest) -> PlanRunResult`
 
-Resolves the run scope before creation.
+Resolves run scope and selected assets before run creation.
 
-`PlanRunRequest` fields:
-- `submission_id: str`
-- `requested_organisations: list[str] | None = None`
-- `requested_template_keys: list[str] | None = None`
-- `requested_asset_keys: list[str] | None = None`
-- `force_revalidate: bool = False`
+### Run lifecycle
 
-`PlanRunResult` fields:
-- `submission_id`
-- `selected_organisations`
-- `selected_templates`
-- `selected_asset_keys`
-- `asset_plan`
-- `warnings`
+#### `create_run(request: CreateRunRequest) -> CreateRunResult`
 
-## Run Lifecycle
+Creates and persists a validation run plus asset snapshots.
 
-### `create_run(request: CreateRunRequest) -> CreateRunResult`
+#### `stage_run_inputs(request: StageRunInputsRequest) -> StageRunInputsResult`
 
-Creates a persisted validation run and captures asset snapshots.
-
-`CreateRunRequest` fields:
-- `submission_id: str`
-- `requested_by: str`
-- `idempotency_key: str`
-- `requested_organisations: list[str] | None = None`
-- `requested_template_keys: list[str] | None = None`
-- `requested_asset_keys: list[str] | None = None`
-
-`CreateRunResult` fields:
-- `run: RunSummary`
-- `asset_snapshots: list[AssetSnapshot]`
-
-### `stage_run_inputs(request: StageRunInputsRequest) -> StageRunInputsResult`
-
-Stages the selected assets to a run-specific destination such as Fabric/OneLake.
-
-`StageRunInputsRequest` fields:
-- `run_id: str`
-- `staged_by: str`
-
-`StageRunInputsResult` fields:
-- `run_id`
-- `state`
-- `staged_assets`
-- `errors`
+Stages run inputs to the configured backing store.
 
 Requires:
-- `asset_stager` configured on the API instance.
+- `asset_stager`
 
-### `trigger_run(request: TriggerRunRequest) -> TriggerRunResult`
+#### `trigger_run(request: TriggerRunRequest) -> TriggerRunResult`
 
-Triggers the external validation pipeline for a staged run.
-
-`TriggerRunRequest` fields:
-- `run_id: str`
-- `triggered_by: str`
-
-`TriggerRunResult` fields:
-- `run_id`
-- `state`
-- `pipeline: PipelineRef`
+Triggers the external pipeline.
 
 Requires:
-- `pipeline_trigger` configured on the API instance.
+- `pipeline_trigger`
 
-### `refresh_run_status(request: RefreshRunStatusRequest) -> RefreshRunStatusResult`
+`TriggerRunResult` also exposes persisted external metadata such as:
+- pipeline config file paths
+- latest known external status metadata when available
 
-Polls the external pipeline status and updates the run state.
+#### `refresh_run_status(request: RefreshRunStatusRequest) -> RefreshRunStatusResult`
 
-`RefreshRunStatusRequest` fields:
-- `run_id: str`
+Refreshes one active run from the external pipeline status.
 
-`RefreshRunStatusResult` fields:
-- `run_id`
-- `state`
-- `pipeline_status`
-- `latest_error`
+If success is observed externally, the run is auto-finalized for run-history purposes only. Submission validation metadata is not updated automatically.
 
 Requires:
-- `pipeline_status_resolver` configured on the API instance if external status polling is needed.
+- `pipeline_status_resolver` for live external status
 
-### `finalize_run(request: FinalizeRunRequest) -> FinalizeRunResult`
+`RefreshRunStatusResult` includes:
+- canonical run state
+- observed pipeline status
+- normalized latest external error
+- external metadata including:
+  - `pipeline_config_filepaths`
+  - `latest_external_status`
+  - `last_status_sync_ts_utc`
+  - `latest_error`
 
-Stores final result payloads and can optionally apply validation flags back to the submission.
+#### `refresh_running_runs(request: RefreshRunningRunsRequest) -> RefreshRunningRunsResult`
 
-`FinalizeRunRequest` fields:
-- `run_id: str`
-- `result_payload: dict[str, Any]`
-- `finalized_by: str`
-- `apply_validation_flags: bool = False`
-
-`FinalizeRunResult` fields:
-- `run_id`
-- `state`
-- `result_summary`
-- `submission_update`
+Refreshes all active runs matching the optional filters.
 
 Requires:
-- `submission_flag_setter` configured on the API instance if `apply_validation_flags=True`.
+- `pipeline_status_resolver` for live external status
 
-## Run Queries
+#### `poll_run(request: PollRunRequest) -> PollRunResult`
 
-### `get_run(request: GetRunRequest) -> GetRunResult`
+Polls one run until a terminal state or timeout.
+
+Requires:
+- `pipeline_status_resolver` for live external status
+
+#### `finalize_run(request: FinalizeRunRequest) -> FinalizeRunResult`
+
+Stores final results and optionally applies explicit validation flags back to the submission.
+
+When `apply_validation_flags=True`, this is the mechanism that populates:
+- `validated_hash`
+- `validation_run_id`
+
+### Queries
+
+#### `get_run(request: GetRunRequest) -> GetRunResult`
 
 Returns the full persisted run view.
 
-`GetRunRequest` fields:
-- `run_id: str`
+This includes first-class persisted external metadata:
+- `pipeline.pipeline_run_id`
+- `external_metadata.pipeline_config_filepaths`
+- `external_metadata.latest_external_status`
+- `external_metadata.last_status_sync_ts_utc`
+- `external_metadata.latest_error`
 
-`GetRunResult` fields:
-- `run: RunSummary`
-- `asset_snapshots: list[AssetSnapshot]`
-- `staged_assets: list[StagedAsset]`
-- `pipeline: PipelineRef | None`
-- `status_history: list[dict[str, Any]]`
-- `result_summary: dict[str, Any] | None`
+#### `list_running_runs(request: ListRunningRunsRequest) -> ListRunningRunsResult`
 
-### `list_runs(request: ListRunsRequest) -> ListRunsResult`
+Lists only active runs.
 
-Lists persisted validation runs with paging.
+#### `list_runs(request: ListRunsRequest) -> ListRunsResult`
 
-`ListRunsRequest` fields:
-- `submission_id: str | None = None`
-- `state: str | None = None`
-- `requested_by: str | None = None`
-- `page: int = 1`
-- `page_size: int = 25`
+Lists persisted runs with paging and simple filters.
 
-`ListRunsResult` fields:
-- `items: list[RunSummary]`
-- `page`
-- `page_size`
-- `total`
-
-### `list_run_history(request: ListRunHistoryRequest) -> ListRunHistoryResult`
+#### `list_run_history(request: ListRunHistoryRequest) -> ListRunHistoryResult`
 
 Lists persisted runs with richer history detail than `list_runs(...)`.
 
-`ListRunHistoryRequest` fields:
-- `submission_id: str | None = None`
-- `state: str | None = None`
-- `requested_by: str | None = None`
-- `page: int = 1`
-- `page_size: int = 25`
+Each history entry includes the same persisted external metadata summary used by `get_run(...)`.
 
-`ListRunHistoryResult` fields:
-- `items: list[RunHistoryEntry]`
-- `page`
-- `page_size`
-- `total`
+## Removed APIs
 
-`RunHistoryEntry` fields:
-- `run: RunSummary`
-- `pipeline: PipelineRef | None`
-- `latest_error: RunStatusError | None`
-- `status_history: list[dict[str, Any]]`
-- `result_summary: dict[str, Any] | None`
+The old submission-owned run entrypoints were removed from the package surface.
 
-## Core Public Data Types
+Use instead:
+- `ValidationRunApi.list_runs(...)`
+- `ValidationRunApi.plan_run(...)`
+- `ValidationRunApi.create_run(...)`
+- `ValidationRunApi.stage_run_inputs(...)`
+- `ValidationRunApi.trigger_run(...)`
+- or reusable helpers in `workflows.py`
 
-These types are part of the current public Python surface and are exported from the package:
+## Internal Workflow Helpers
 
-- `ApiResponse`
-- `ApiError`
-- `SharePointSourceRef`
-- `OrganisationSubmissionRef`
-- `TemplateSubmissionRef`
-- `TrackedFileRef`
-- `PlanRunRequest`
-- `PlanRunResult`
-- `CreateRunRequest`
-- `CreateRunResult`
-- `StageRunInputsRequest`
-- `StageRunInputsResult`
-- `TriggerRunRequest`
-- `TriggerRunResult`
-- `RefreshRunStatusRequest`
-- `RefreshRunStatusResult`
-- `GetRunRequest`
-- `GetRunResult`
-- `ListRunHistoryRequest`
-- `ListRunHistoryResult`
-- `ListRunsRequest`
-- `ListRunsResult`
-- `FinalizeRunRequest`
-- `FinalizeRunResult`
-- `RunSummary`
-- `AssetSnapshot`
-- `StagedAsset`
-- `PipelineRef`
-- `RunStatusError`
-- `RunHistoryEntry`
+The internal orchestration layer currently includes helpers such as:
+- `create_submission_from_discovery(...)`
+- `edit_submission_workflow(...)`
+- `run_submission_workflow(...)`
+- `refresh_active_runs_workflow(...)`
+- `resolve_sharepoint_folder_listing(...)`
+- `find_sharepoint_match_by_search_term(...)`
 
-## Notes On Current Shape
+These are reusable from GUI/CLI code, but they are internal orchestration helpers rather than the main stable service contract.
 
-- `ValidationServiceApi` still exposes some legacy run methods.
-- `ValidationRunApi` is the main path for new validation-run work.
-- Some higher-level orchestration still lives in the smoke script rather than fully in the service layer.
-- This document covers the callable service surface that exists now, not the full desired future API.
+## Examples
+
+The example scripts are client adapters over the stable APIs and workflow helpers:
+- [create_submission.py](examples/create_submission.py)
+- [edit_submission.py](examples/edit_submission.py)
+- [run_submission.py](examples/run_submission.py)
+- [get_run.py](examples/get_run.py)
+- [list_runs.py](examples/list_runs.py)
+- [list_running_runs.py](examples/list_running_runs.py)
+- [refresh_run_status.py](examples/refresh_run_status.py)
+- [refresh_running_runs.py](examples/refresh_running_runs.py)
+- [list_run_history.py](examples/list_run_history.py)
+
+They are intentionally useful operational clients, but they are not part of the stable API contract.

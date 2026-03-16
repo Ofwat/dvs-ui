@@ -5,6 +5,12 @@ from pathlib import Path
 import tempfile
 
 from refactor.services.data_validation_api.submission_service import (
+    CreateSubmissionRequest,
+    EditSubmissionRequest,
+    ListSubmissionsRequest,
+    ListEditHistoryRequest,
+    RefreshSubmissionRequest,
+    SetValidationFlagsRequest,
     VALIDATION_NOT_VALIDATED,
     VALIDATION_VALIDATED,
     JsonFileIdempotencyStore,
@@ -62,21 +68,38 @@ class SubmissionServiceTests(unittest.TestCase):
             submissions_registry_path="Files/validation-service/events/submission_events.jsonl",
         )
 
+    def _create_submission(self, service: ValidationServiceApi, request: CreateSubmissionRequest | None = None, **kwargs):
+        return service.create_submission(request or CreateSubmissionRequest(**kwargs))
+
+    def _edit_submission(self, service: ValidationServiceApi, request: EditSubmissionRequest | None = None, **kwargs):
+        return service.edit_submission(request or EditSubmissionRequest(**kwargs))
+
+    def _list_submissions(self, service: ValidationServiceApi, **kwargs):
+        return service.list_submissions(ListSubmissionsRequest(**kwargs))
+
+    def _refresh_submission_hashes(self, service: ValidationServiceApi, request: RefreshSubmissionRequest | None = None, **kwargs):
+        return service.refresh_submission_hashes(request or RefreshSubmissionRequest(**kwargs))
+
+    def _set_validation_flags(self, service: ValidationServiceApi, request: SetValidationFlagsRequest | None = None, **kwargs):
+        return service.set_validation_flags(request or SetValidationFlagsRequest(**kwargs))
+
     def test_create_submission_and_list_submissions(self):
         service = self._service()
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={
-                "org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN"),
-                "org2": self._org_ref("group", "Group B", "nested/org2/file.xlsx", "TPL_MAIN"),
-            },
-            templates={
-                "tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1", "ORG2"),
-            },
-            created_by="alice@example.com",
-            idempotency_key="create-1",
-            note="Initial submission note",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={
+                    "org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN"),
+                    "org2": self._org_ref("group", "Group B", "nested/org2/file.xlsx", "TPL_MAIN"),
+                },
+                templates={
+                    "tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1", "ORG2"),
+                },
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+                note="Initial submission note",
+            )
         )
 
         self.assertTrue(created.ok)
@@ -90,30 +113,51 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertEqual(created.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]["validated_hash"], None)
         self.assertEqual(created.data["organisations"]["ORG1"]["file"]["tracked_files"][0]["size_bytes"], 101)
 
-        listed = service.list_submissions(process_cd="PROC_A")
+        listed = service.list_submissions(ListSubmissionsRequest(process_cd="PROC_A"))
         self.assertTrue(listed.ok)
         assert listed.data is not None
         self.assertEqual(len(listed.data), 1)
 
+    def test_submission_api_accepts_typed_request_objects(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"ORG1": self._org_ref("drive", "Drive A", "org1.csv", "TPL_MAIN")},
+                templates={"TPL_MAIN": self._template_ref("drive", "Drive A", "template.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="typed-create-1",
+            )
+        )
+        self.assertTrue(created.ok)
+        listed = service.list_submissions(ListSubmissionsRequest(process_cd="PROC_A"))
+        self.assertTrue(listed.ok)
+        self.assertEqual(len(listed.items), 1)
+
     def test_create_submission_rejects_duplicate_active(self):
         service = self._service()
-        first = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        first = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
         self.assertTrue(first.ok)
 
-        second = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org2": self._org_ref("group", "Group B", "org2/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-2",
+        second = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org2": self._org_ref("group", "Group B", "org2/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-2",
+            )
         )
         self.assertFalse(second.ok)
         assert second.error is not None
@@ -121,13 +165,15 @@ class SubmissionServiceTests(unittest.TestCase):
 
     def test_create_submission_accepts_watched_tracked_files(self):
         service = self._service()
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": OrganisationSubmissionRef(self._watch_source_ref("drive", "Drive A", "ORG1"), ["TPL_MAIN"])},
-            templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
-            created_by="alice@example.com",
-            idempotency_key="create-watch-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": OrganisationSubmissionRef(self._watch_source_ref("drive", "Drive A", "ORG1"), ["TPL_MAIN"])},
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="create-watch-1",
+            )
         )
 
         self.assertTrue(created.ok)
@@ -136,38 +182,44 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertIsNone(tracked["path"])
         self.assertTrue(tracked["watch"])
         self.assertEqual(tracked["watch_search_term"], "ORG1")
+        self.assertIsNone(tracked["validation_run_id"])
 
     def test_set_validation_flags_updates_org_and_template_state(self):
         service = self._service()
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
-            templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
         assert created.data is not None
         submission_id = created.data["submission_id"]
 
-        partial = service.set_validation_flags(
-            submission_id=submission_id,
-            organisation_changes={"org1": VALIDATION_VALIDATED},
-            template_changes=None,
-            modified_by="bob@example.com",
-            idempotency_key="flag-1",
+        partial = self._set_validation_flags(service,
+            SetValidationFlagsRequest(
+                submission_id=submission_id,
+                organisation_changes={"org1": VALIDATION_VALIDATED},
+                template_changes=None,
+                modified_by="bob@example.com",
+                idempotency_key="flag-1",
+            )
         )
         self.assertTrue(partial.ok)
         assert partial.data is not None
-        self.assertEqual(partial.data["organisations"]["ORG1"]["company_validation_flag"], VALIDATION_VALIDATED)
-        self.assertEqual(partial.data["organisations"]["ORG1"]["validation_flag"], "partially_validated")
+        self.assertEqual(partial.data["organisations"]["ORG1"]["validation_flag"], VALIDATION_VALIDATED)
 
-        complete = service.set_validation_flags(
-            submission_id=submission_id,
-            organisation_changes=None,
-            template_changes={"tpl_main": VALIDATION_VALIDATED},
-            modified_by="bob@example.com",
-            idempotency_key="flag-2",
+        complete = self._set_validation_flags(service,
+            SetValidationFlagsRequest(
+                submission_id=submission_id,
+                organisation_changes=None,
+                template_changes={"tpl_main": VALIDATION_VALIDATED},
+                modified_by="bob@example.com",
+                idempotency_key="flag-2",
+            )
         )
         self.assertTrue(complete.ok)
         assert complete.data is not None
@@ -176,23 +228,27 @@ class SubmissionServiceTests(unittest.TestCase):
 
     def test_edit_submission_can_add_company_and_template(self):
         service = self._service()
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
         assert created.data is not None
 
-        edited = service.edit_submission(
-            submission_id=created.data["submission_id"],
-            modified_by="bob@example.com",
-            idempotency_key="edit-1",
-            organisation_upserts={"org2": self._org_ref("group", "Group B", "org2/file.xlsx", "TPL_TWO")},
-            template_upserts={"tpl_two": self._template_ref("drive", "Templates", "templates/two.xlsx", "ORG2")},
-            reason="Add second company and template",
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                organisation_upserts={"org2": self._org_ref("group", "Group B", "org2/file.xlsx", "TPL_TWO")},
+                template_upserts={"tpl_two": self._template_ref("drive", "Templates", "templates/two.xlsx", "ORG2")},
+                reason="Add second company and template",
+            )
         )
 
         self.assertTrue(edited.ok)
@@ -204,58 +260,147 @@ class SubmissionServiceTests(unittest.TestCase):
 
     def test_edit_submission_can_update_note(self):
         service = self._service()
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
-            note="First note",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+                note="First note",
+            )
         )
         assert created.data is not None
 
-        edited = service.edit_submission(
-            submission_id=created.data["submission_id"],
-            modified_by="bob@example.com",
-            idempotency_key="edit-1",
-            note="Updated note",
-            reason="Clarify submission",
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                note="Updated note",
+                reason="Clarify submission",
+            )
         )
 
         self.assertTrue(edited.ok)
         assert edited.data is not None
         self.assertEqual(edited.data["note"], "Updated note")
+        self.assertIsNone(edited.data["organisations"]["ORG1"]["file"]["tracked_files"][0]["validation_run_id"])
+
+    def test_edit_submission_can_update_validation_flags(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
+        )
+        assert created.data is not None
+
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-flags-1",
+                organisation_validation_changes={"org1": VALIDATION_VALIDATED},
+                template_validation_changes={"tpl_main": VALIDATION_VALIDATED},
+                reason="Manual validation review",
+            )
+        )
+
+        self.assertTrue(edited.ok)
+        assert edited.data is not None
+        self.assertEqual(edited.data["organisations"]["ORG1"]["validation_flag"], VALIDATION_VALIDATED)
+        self.assertEqual(edited.data["templates"]["TPL_MAIN"]["validation_flag"], VALIDATION_VALIDATED)
+        self.assertEqual(
+            edited.data["organisations"]["ORG1"]["file"]["tracked_files"][0]["validated_hash"],
+            "hash-1",
+        )
+        self.assertEqual(
+            edited.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]["validated_hash"],
+            "hash-1",
+        )
+
+    def test_edit_submission_resets_tracking_metadata_for_upserted_files(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
+        )
+        assert created.data is not None
+
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-reset-1",
+                organisation_upserts={"org1": self._org_ref("drive", "Drive A", "org1/new_file.xlsx", "TPL_MAIN")},
+                template_upserts={"tpl_main": self._template_ref("drive", "Templates", "templates/new_main.xlsx", "ORG1")},
+            )
+        )
+
+        self.assertTrue(edited.ok)
+        assert edited.data is not None
+        org_tracked = edited.data["organisations"]["ORG1"]["file"]["tracked_files"][0]
+        self.assertEqual(org_tracked["path"], "org1/new_file.xlsx")
+        self.assertIsNone(org_tracked["current_hash"])
+        self.assertIsNone(org_tracked["validated_hash"])
+        self.assertIsNone(org_tracked["validation_run_id"])
+        self.assertIsNone(org_tracked["size_bytes"])
+        self.assertIsNone(org_tracked["created"])
+        self.assertIsNone(org_tracked["modified"])
+        self.assertIsNone(org_tracked["modified_by"])
+        tpl_tracked = edited.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]
+        self.assertEqual(tpl_tracked["path"], "templates/new_main.xlsx")
+        self.assertIsNone(tpl_tracked["current_hash"])
+        self.assertIsNone(tpl_tracked["validated_hash"])
+        self.assertIsNone(tpl_tracked["validation_run_id"])
+        self.assertIsNone(tpl_tracked["size_bytes"])
 
     def test_list_edit_history_returns_submission_changes_only(self):
         service = self._service()
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
-            note="Initial note",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+                note="Initial note",
+            )
         )
         assert created.data is not None
         submission_id = created.data["submission_id"]
 
-        service.edit_submission(
-            submission_id=submission_id,
-            modified_by="bob@example.com",
-            idempotency_key="edit-1",
-            note="Updated note",
-            reason="Clarify submission",
+        self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=submission_id,
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                note="Updated note",
+                reason="Clarify submission",
+            )
         )
 
-        history = service.list_edit_history(submission_id=submission_id)
+        history = service.list_edit_history(ListEditHistoryRequest(submission_id=submission_id))
 
         self.assertTrue(history.ok)
         assert history.data is not None
-        self.assertEqual([item["event_type"] for item in history.data], ["submission_created", "submission_note_updated"])
-        self.assertEqual(history.data[-1]["actor"], "bob@example.com")
-        self.assertEqual(history.data[-1]["summary"], "Submission note updated.")
+        self.assertEqual([item["event_type"] for item in history.data], ["submission_note_updated", "submission_created"])
+        self.assertEqual(history.data[0]["actor"], "bob@example.com")
+        self.assertEqual(history.data[0]["summary"], "Submission note updated.")
 
     def test_submission_tracks_last_modified_user_and_timestamp(self):
         timestamps = iter(
@@ -269,23 +414,27 @@ class SubmissionServiceTests(unittest.TestCase):
             submissions_registry_path="Files/validation-service/events/submission_events.jsonl",
             now_fn=lambda: next(timestamps),
         )
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
         assert created.data is not None
         self.assertEqual(created.data["created_by"], "alice@example.com")
         self.assertEqual(created.data["last_modified_by"], "alice@example.com")
 
-        edited = service.edit_submission(
-            submission_id=created.data["submission_id"],
-            modified_by="bob@example.com",
-            idempotency_key="edit-1",
-            note="Updated note",
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                note="Updated note",
+            )
         )
         self.assertTrue(edited.ok)
         assert edited.data is not None
@@ -319,21 +468,25 @@ class SubmissionServiceTests(unittest.TestCase):
             submissions_registry_path="Files/validation-service/events/submission_events.jsonl",
             sharepoint_hash_resolver=refresh_resolver,
         )
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
-            templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
         assert created.data is not None
         submission_id = created.data["submission_id"]
 
-        refreshed = service.refresh_submission_hashes(
-            submission_id=submission_id,
-            refreshed_by="carol@example.com",
-            idempotency_key="refresh-1",
+        refreshed = self._refresh_submission_hashes(service,
+            RefreshSubmissionRequest(
+                submission_id=submission_id,
+                refreshed_by="carol@example.com",
+                idempotency_key="refresh-1",
+            )
         )
         self.assertTrue(refreshed.ok)
         assert refreshed.data is not None
@@ -385,20 +538,24 @@ class SubmissionServiceTests(unittest.TestCase):
             submissions_registry_path="Files/validation-service/events/submission_events.jsonl",
             sharepoint_hash_resolver=refresh_resolver,
         )
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": OrganisationSubmissionRef(self._watch_source_ref("drive", "Drive A", "ORG1"), [])},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-watch-refresh-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": OrganisationSubmissionRef(self._watch_source_ref("drive", "Drive A", "ORG1"), [])},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-watch-refresh-1",
+            )
         )
         assert created.data is not None
 
-        refreshed = service.refresh_submission_hashes(
-            submission_id=created.data["submission_id"],
-            refreshed_by="carol@example.com",
-            idempotency_key="refresh-watch-1",
+        refreshed = self._refresh_submission_hashes(service,
+            RefreshSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                refreshed_by="carol@example.com",
+                idempotency_key="refresh-watch-1",
+            )
         )
 
         self.assertTrue(refreshed.ok)
@@ -423,13 +580,15 @@ class SubmissionServiceTests(unittest.TestCase):
             submissions_projection_path=projection_path,
         )
 
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
 
         self.assertTrue(created.ok)
@@ -444,7 +603,7 @@ class SubmissionServiceTests(unittest.TestCase):
             idempotency_store=JsonFileIdempotencyStore(idempotency_path),
             submissions_projection_path=projection_path,
         )
-        listed = reloaded.list_submissions(process_cd="PROC_A")
+        listed = reloaded.list_submissions(ListSubmissionsRequest(process_cd="PROC_A"))
         self.assertTrue(listed.ok)
         assert listed.data is not None
         self.assertEqual(len(listed.data), 1)
@@ -459,63 +618,20 @@ class SubmissionServiceTests(unittest.TestCase):
             projection_metadata_provider=lambda: {"files": [{"path": "Files/validation-service/projections/submissions_current.json"}]},
         )
 
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
-            templates={},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
         )
 
         self.assertTrue(created.ok)
         projection_payload = json.loads(projection_path.read_text(encoding="utf-8"))
         self.assertIn("storage_metadata", projection_payload)
-
-    def test_start_validation_run_stages_company_and_template_files(self):
-        staged_calls: list[tuple[str, str]] = []
-
-        def run_stager(source_payload: dict[str, object], tracked_file: dict[str, object], run_id: str, org_cd: str):
-            staged_calls.append((org_cd, str(tracked_file["path"])))
-            return {
-                "path": tracked_file["path"],
-                "staging_path": f"Files/validation-service/runs/{run_id}/{org_cd}/{tracked_file['path']}",
-                "byte_count": 123,
-                "asset_kind": tracked_file.get("asset_kind"),
-                "asset_key": tracked_file.get("asset_key"),
-            }
-
-        service = ValidationServiceApi(
-            workspace_id="ws-1",
-            submissions_registry_path="Files/validation-service/events/submission_events.jsonl",
-            run_file_stager=run_stager,
-        )
-        created = service.create_submission(
-            process_cd="PROC_A",
-            submission_period_cd="2026M01",
-            organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
-            templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
-            created_by="alice@example.com",
-            idempotency_key="create-1",
-        )
-        assert created.data is not None
-
-        started = service.start_validation_run(
-            submission_id=created.data["submission_id"],
-            requested_org_files={"org1": None},
-            started_by="alice@example.com",
-            idempotency_key="run-1",
-            refresh_hashes=False,
-        )
-
-        self.assertTrue(started.ok)
-        assert started.data is not None
-        self.assertEqual(started.data["state"], "staged")
-        self.assertEqual(
-            staged_calls,
-            [("ORG1", "org1/file.xlsx"), ("ORG1", "templates/main.xlsx")],
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

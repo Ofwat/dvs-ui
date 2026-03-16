@@ -13,7 +13,7 @@ from common import (
     prompt_service_config,
     prompt_text,
 )
-from refactor.services.data_validation_api import ListRunHistoryRequest
+from refactor.services.data_validation_api import ListRunHistoryRequest, ListSubmissionsRequest
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
 
     submission_service = build_submission_service(config["service"])
     run_api = build_run_api(config)
-    submissions_response = submission_service.list_submissions()
+    submissions_response = submission_service.list_submissions(ListSubmissionsRequest())
     result: dict[str, object] = {"list_submissions": submissions_response.to_dict()}
 
     submissions = submissions_response.data if submissions_response.ok else None

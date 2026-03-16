@@ -5,7 +5,6 @@ from pathlib import Path
 import sys
 from typing import Any
 from uuid import UUID
-import hashlib
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
 if str(ROOT_DIR) not in sys.path:
@@ -14,30 +13,26 @@ if str(ROOT_DIR) not in sys.path:
 from refactor.online_auth import (  # noqa: E402
     check_token_access,
     download_lakehouse_file,
-    download_sharepoint_item,
     get_fabric_pipeline_run,
-    get_drive,
     get_current_user,
     list_fabric_lakehouses,
     list_fabric_pipeline_runs,
     list_fabric_pipelines,
-    list_sharepoint_drive_items,
     list_fabric_workspaces,
-    resolve_sharepoint_share_url,
+    trigger_fabric_pipeline,
     write_lakehouse_file,
 )
 from refactor.services.data_validation_api import (  # noqa: E402
-    OrganisationSubmissionRef,
-    SharePointSourceRef,
-    TemplateSubmissionRef,
+    ListSubmissionsRequest,
+    StagedAsset,
     TextBackedIdempotencyStore,
     TextBackedProjectionStore,
     TextBackedRunEventStore,
     TextBackedSubmissionEventStore,
-    TrackedFileRef,
     ValidationRunApi,
     ValidationServiceApi,
 )
+from refactor.services.data_validation_api import workflows as wf  # noqa: E402
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
@@ -75,17 +70,15 @@ def parse_optional_text(payload: bytes | str) -> str | None:
 
 
 def is_guid(value: str | None) -> bool:
-    if not value:
-        return False
-    try:
-        UUID(str(value))
-    except (ValueError, TypeError, AttributeError):
-        return False
-    return True
+    return wf.is_guid(value)
 
 
 def hash_bytes(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
+    return wf.hash_bytes(content)
+
+
+def normalize_relative_path(relative_path: str) -> str:
+    return wf.normalize_relative_path(relative_path)
 
 
 def resolve_actor(explicit_actor: str | None) -> str:
@@ -210,309 +203,12 @@ def prompt_service_config(*, include_pipeline: bool = False) -> dict[str, Any]:
         }
     return {"service": service, "pipeline": pipeline, "scenario": {"submission": {}}}
 
-
-def _list_sharepoint_descendants(
-    drive_id: str,
-    parent_item_id: str,
-    *,
-    parent_relative_path: str = "",
-) -> list[dict[str, Any]]:
-    items_ok, items_payload = list_sharepoint_drive_items(drive_id, parent_item_id)
-    require_ok("list_sharepoint_drive_items", items_ok, items_payload)
-
-    descendants: list[dict[str, Any]] = []
-    for item in items_payload:
-        item_name = str(item.get("name", "")).strip("/")
-        relative_path = "/".join(part for part in [parent_relative_path, item_name] if part)
-        enriched = {**item, "relativePath": relative_path}
-        descendants.append(enriched)
-        if item.get("isFolder") and item.get("id"):
-            descendants.extend(
-                _list_sharepoint_descendants(
-                    drive_id,
-                    str(item["id"]),
-                    parent_relative_path=relative_path,
-                )
-            )
-    return descendants
-
-
-def resolve_sharepoint_folder_listing(share_url: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    success, payload = resolve_sharepoint_share_url(share_url)
-    require_ok("resolve_sharepoint_share_url", success, payload)
-
-    parent_reference = payload.get("parentReference", {})
-    drive_id = str(parent_reference.get("driveId") or "")
-    if not drive_id:
-        raise RuntimeError("Resolved SharePoint link did not include driveId.")
-    linked_item_id = str(payload.get("id") or "")
-    linked_item_name = str(payload.get("name") or "").strip("/")
-    linked_item_is_folder = bool(payload.get("folder"))
-    if not linked_item_is_folder:
-        raise RuntimeError("SharePoint link must point to a folder for scanning by company acronym.")
-
-    drive_ok, drive_payload = get_drive(drive_id)
-    require_ok("get_drive", drive_ok, drive_payload)
-    items_payload = _list_sharepoint_descendants(drive_id, linked_item_id)
-
-    root_path = str(parent_reference.get("path", "")).split("root:/", 1)[-1].strip("/")
-    combined_root = "/".join(part for part in [root_path, linked_item_name] if part)
-    context = {
-        "folder_url": share_url,
-        "drive_id": drive_id,
-        "linked_item_id": linked_item_id,
-        "linked_item_name": linked_item_name,
-        "linked_item_is_folder": True,
-        "source_type": "drive",
-        "target_name": str(drive_payload.get("name") or drive_id),
-        "root_path": combined_root,
-    }
-    return context, list(items_payload)
-
-
-def extract_item_modified_by(item_payload: dict[str, Any]) -> str | None:
-    last_modified_by = item_payload.get("lastModifiedBy", {})
-    if isinstance(last_modified_by, dict):
-        user = last_modified_by.get("user", {})
-        if isinstance(user, dict) and user.get("displayName"):
-            return str(user["displayName"])
-        application = last_modified_by.get("application", {})
-        if isinstance(application, dict) and application.get("displayName"):
-            return str(application["displayName"])
-    if item_payload.get("lastModifiedBy"):
-        return str(item_payload["lastModifiedBy"])
-    return None
-
-
-def _build_tracked_file_from_item(drive_id: str, item_id: str, relative_path: str, item_payload: dict[str, Any] | None = None) -> TrackedFileRef:
-    file_ok, file_payload = download_sharepoint_item(drive_id, item_id)
-    require_ok("download_sharepoint_item", file_ok, file_payload)
-    metadata = item_payload or {}
-    return TrackedFileRef(
-        path=relative_path,
-        watch=False,
-        watch_search_term=None,
-        current_hash=hash_bytes(file_payload),
-        validated_hash=None,
-        size_bytes=len(file_payload),
-        created=str(metadata.get("createdDateTime")).strip() if metadata.get("createdDateTime") else None,
-        modified=str(metadata.get("lastModifiedDateTime")).strip() if metadata.get("lastModifiedDateTime") else None,
-        modified_by=extract_item_modified_by(metadata),
-    )
-
-
-def refresh_source_hashes(source_payload: dict[str, Any]) -> dict[str, Any]:
-    source = SharePointSourceRef.from_dict(source_payload)
-    if not source.folder_url:
-        raise RuntimeError("Cannot refresh SharePoint hashes without folder_url in the stored source payload.")
-
-    context, items = resolve_sharepoint_folder_listing(source.folder_url)
-    item_by_path = {
-        str(item.get("relativePath") or item.get("name") or "").strip("/"): item
-        for item in items
-    }
-    validated_by_key = {
-        (item.path or "", item.watch_search_term or ""): item.validated_hash
-        for item in source.tracked_files
-    }
-
-    tracked_files: list[TrackedFileRef] = []
-    for tracked in source.tracked_files:
-        if tracked.path:
-            matched_item = item_by_path.get(tracked.path.strip("/"))
-            if matched_item and not matched_item.get("isFolder"):
-                resolved = _build_tracked_file_from_item(
-                    str(context["drive_id"]),
-                    str(matched_item["id"]),
-                    str(matched_item.get("relativePath") or matched_item.get("name") or tracked.path),
-                    matched_item,
-                )
-                tracked_files.append(
-                    TrackedFileRef(
-                        path=resolved.path,
-                        watch=False,
-                        watch_search_term=tracked.watch_search_term,
-                        current_hash=resolved.current_hash,
-                        validated_hash=validated_by_key.get((tracked.path or "", tracked.watch_search_term or "")),
-                        size_bytes=resolved.size_bytes,
-                        created=resolved.created,
-                        modified=resolved.modified,
-                        modified_by=resolved.modified_by,
-                    )
-                )
-            else:
-                tracked_files.append(
-                    TrackedFileRef(
-                        path=tracked.path,
-                        watch=tracked.watch,
-                        watch_search_term=tracked.watch_search_term,
-                        current_hash=None,
-                        validated_hash=validated_by_key.get((tracked.path or "", tracked.watch_search_term or "")),
-                        size_bytes=None,
-                        created=None,
-                        modified=None,
-                        modified_by=None,
-                    )
-                )
-            continue
-
-        if tracked.watch:
-            search_term = tracked.watch_search_term or ""
-            matched_item = find_sharepoint_match_by_search_term(items, search_term)
-            if matched_item and not matched_item.get("isFolder"):
-                resolved = _build_tracked_file_from_item(
-                    str(context["drive_id"]),
-                    str(matched_item["id"]),
-                    str(matched_item.get("relativePath") or matched_item.get("name") or search_term),
-                    matched_item,
-                )
-                tracked_files.append(
-                    TrackedFileRef(
-                        path=resolved.path,
-                        watch=False,
-                        watch_search_term=search_term,
-                        current_hash=resolved.current_hash,
-                        validated_hash=validated_by_key.get(("", search_term)),
-                        size_bytes=resolved.size_bytes,
-                        created=resolved.created,
-                        modified=resolved.modified,
-                        modified_by=resolved.modified_by,
-                    )
-                )
-            else:
-                tracked_files.append(
-                    TrackedFileRef(
-                        path=None,
-                        watch=True,
-                        watch_search_term=search_term,
-                        current_hash=None,
-                        validated_hash=validated_by_key.get(("", search_term)),
-                        size_bytes=None,
-                        created=None,
-                        modified=None,
-                        modified_by=None,
-                    )
-                )
-
-    return SharePointSourceRef(
-        source_type=source.source_type,
-        target_name=source.target_name,
-        root_path=source.root_path,
-        tracked_files=tracked_files,
-        folder_url=source.folder_url,
-        drive_id=source.drive_id,
-        linked_item_id=source.linked_item_id,
-        linked_item_name=source.linked_item_name,
-        linked_item_is_folder=source.linked_item_is_folder,
-    ).to_dict()
-
-
-def find_prefix_matches(items: list[dict[str, Any]], prefix: str) -> dict[str, Any]:
-    normalized_prefix = prefix.strip().upper()
-    matches = [
-        item
-        for item in items
-        if str(item.get("name", "")).strip().upper().startswith(normalized_prefix)
-    ]
-    file_matches = [item for item in matches if not item.get("isFolder")]
-    folder_matches = [item for item in matches if item.get("isFolder")]
-    chosen = file_matches[0] if file_matches else (folder_matches[0] if folder_matches else None)
-    return {
-        "matches": matches,
-        "file_matches": file_matches,
-        "folder_matches": folder_matches,
-        "chosen": chosen,
-    }
-
-
-def build_sharepoint_source(payload: dict[str, Any]) -> SharePointSourceRef:
-    tracked_file_payloads = payload.get("tracked_files")
-    files = [str(item).strip() for item in payload.get("files", []) if str(item).strip()]
-    tracked_files = (
-        [TrackedFileRef.from_dict(item) for item in tracked_file_payloads if isinstance(item, (dict, str))]
-        if tracked_file_payloads is not None
-        else [TrackedFileRef(path=path, watch=False, watch_search_term=None) for path in files]
-    )
-    folder_url = str(payload.get("folder_url")).strip() if payload.get("folder_url") else None
-    source_type = str(payload.get("source_type", "")).strip()
-    target_name = str(payload.get("target_name", "")).strip()
-    root_path = str(payload.get("root_path", "")).strip()
-    drive_id = str(payload.get("drive_id")).strip() if payload.get("drive_id") else None
-    linked_item_id = str(payload.get("linked_item_id")).strip() if payload.get("linked_item_id") else None
-    linked_item_name = str(payload.get("linked_item_name")).strip() if payload.get("linked_item_name") else None
-    linked_item_is_folder = bool(payload["linked_item_is_folder"]) if payload.get("linked_item_is_folder") is not None else None
-
-    if (not source_type or not target_name or not root_path or not drive_id or not linked_item_id or not linked_item_name or linked_item_is_folder is None) and folder_url:
-        success, resolved = resolve_sharepoint_share_url(folder_url)
-        require_ok("resolve_sharepoint_share_url", success, resolved)
-        parent_reference = resolved.get("parentReference", {})
-        resolved_drive_id = str(parent_reference.get("driveId") or "")
-        if not resolved_drive_id:
-            raise RuntimeError("Resolved SharePoint link did not include driveId.")
-        drive_ok, drive_payload = get_drive(resolved_drive_id)
-        require_ok("get_drive", drive_ok, drive_payload)
-        source_type = source_type or "drive"
-        target_name = target_name or str(drive_payload.get("name") or resolved_drive_id)
-        root_path = root_path or str(parent_reference.get("path", "")).split("root:/", 1)[-1].strip("/")
-        drive_id = drive_id or resolved_drive_id
-        linked_item_id = linked_item_id or str(resolved.get("id") or "")
-        linked_item_name = linked_item_name or str(resolved.get("name", "")).strip("/")
-        if linked_item_is_folder is None:
-            linked_item_is_folder = bool(resolved.get("folder"))
-
-    if tracked_file_payloads is None and folder_url and drive_id and linked_item_id and linked_item_is_folder:
-        descendants = _list_sharepoint_descendants(str(drive_id), str(linked_item_id))
-        items_by_path = {
-            str(item.get("relativePath") or item.get("name") or "").strip("/"): item
-            for item in descendants
-        }
-        enriched_tracked_files: list[TrackedFileRef] = []
-        for tracked in tracked_files:
-            tracked_path = str(tracked.path or "").strip("/")
-            matched_item = items_by_path.get(tracked_path)
-            if matched_item and not matched_item.get("isFolder") and matched_item.get("id"):
-                enriched_tracked_files.append(
-                    _build_tracked_file_from_item(
-                        str(drive_id),
-                        str(matched_item["id"]),
-                        str(matched_item.get("relativePath") or matched_item.get("name") or tracked_path),
-                        matched_item,
-                    )
-                )
-            else:
-                enriched_tracked_files.append(tracked)
-        tracked_files = enriched_tracked_files
-
-    return SharePointSourceRef(
-        source_type=source_type,
-        target_name=target_name,
-        root_path=root_path,
-        tracked_files=tracked_files,
-        folder_url=folder_url,
-        drive_id=drive_id,
-        linked_item_id=linked_item_id,
-        linked_item_name=linked_item_name,
-        linked_item_is_folder=linked_item_is_folder,
-    )
+resolve_sharepoint_folder_listing = wf.resolve_sharepoint_folder_listing
+find_prefix_matches = wf.find_prefix_matches
 
 
 def build_submission_refs(payload: dict[str, Any]) -> tuple[dict[str, OrganisationSubmissionRef], dict[str, TemplateSubmissionRef]]:
-    organisations = {
-        str(org_cd).strip().upper(): OrganisationSubmissionRef(
-            sharepoint_source=build_sharepoint_source(org_payload),
-            template_keys=[str(item).strip().upper() for item in org_payload.get("template_keys", []) if str(item).strip()],
-        )
-        for org_cd, org_payload in payload.get("organisations", {}).items()
-    }
-    templates = {
-        str(template_key).strip().upper(): TemplateSubmissionRef(
-            assignment_mode=str(template_payload.get("assignment_mode", "shared")).strip().lower(),
-            applies_to=[str(item).strip().upper() for item in template_payload.get("applies_to", []) if str(item).strip()],
-            sharepoint_source=build_sharepoint_source(template_payload),
-        )
-        for template_key, template_payload in payload.get("templates", {}).items()
-    }
-    return organisations, templates
+    return wf.build_submission_refs(payload)
 
 
 def build_storage_context(config: dict[str, Any]) -> tuple[str, Any, Any]:
@@ -564,16 +260,18 @@ def build_submission_service(config: dict[str, Any]) -> ValidationServiceApi:
         submissions_projection_store=TextBackedProjectionStore(
             write_text=lambda content: write_text(str(config["submissions_projection_path"]), content),
         ),
-        sharepoint_hash_resolver=refresh_source_hashes,
+        sharepoint_hash_resolver=wf.refresh_source_hashes,
     )
 
 
-def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
+def build_run_api(config: dict[str, Any], submission_service: ValidationServiceApi | None = None) -> ValidationRunApi:
     service_config = config.get("service", config)
-    _, read_text, write_text = build_storage_context(service_config)
+    workspace_id, read_text, write_text = build_storage_context(service_config)
     runs_events_path = str(service_config.get("runs_events_path", "Files/validation-service/events/run_events.jsonl"))
     runs_projection_path = str(service_config.get("runs_projection_path", "Files/validation-service/projections/runs_current.json"))
     runs_idempotency_path = str(service_config.get("runs_idempotency_path", "Files/validation-service/system/run_idempotency.json"))
+    lakehouse_name = str(service_config.get("lakehouse_display_name", "")).strip()
+    workspace_name = str(service_config.get("workspace_display_name", "")).strip()
 
     pipeline_config = config.get("pipeline", {})
     pipeline_workspace_id = None
@@ -589,6 +287,110 @@ def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
         require_ok("list_fabric_pipelines", pipelines_ok, pipelines_payload)
         pipeline = find_by_display_name(pipelines_payload, pipeline_display_name, "Pipeline")
         pipeline_id = str(pipeline["id"])
+
+    def submission_resolver(submission_id: str) -> dict[str, Any] | None:
+        if submission_service is None:
+            return None
+        response = submission_service.list_submissions(ListSubmissionsRequest())
+        items = response.data if response.ok else None
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if isinstance(item, dict) and str(item.get("submission_id")) == submission_id:
+                return item
+        return None
+    submission_flag_setter = submission_service.set_validation_flags if submission_service is not None else None
+
+    workspaces_ok, workspaces_payload = list_fabric_workspaces()
+    require_ok("list_fabric_workspaces", workspaces_ok, workspaces_payload)
+    workspace = find_by_display_name(workspaces_payload, workspace_name, "Workspace")
+    lakehouses_ok, lakehouses_payload = list_fabric_lakehouses(str(workspace["id"]))
+    require_ok("list_fabric_lakehouses", lakehouses_ok, lakehouses_payload)
+    lakehouse = find_by_display_name(lakehouses_payload, lakehouse_name, "Lakehouse")
+    lakehouse_id = str(lakehouse["id"])
+
+    def asset_stager(snapshot: Any, run_id: str):
+        source_payload = {
+            "source_type": snapshot.source.source_type,
+            "target_name": snapshot.source.target_name,
+            "root_path": snapshot.source.root_path,
+            "folder_url": snapshot.source.folder_url,
+        }
+        tracked_file = {"path": snapshot.source.path}
+        unit_key = (
+            f"companies/{snapshot.organisation_cds[0]}"
+            if snapshot.asset_type == "organisation_input" and snapshot.organisation_cds
+            else f"templates/{snapshot.asset_key}"
+        )
+        staged = wf.stage_file_to_fabric(
+            workspace_id,
+            lakehouse_id,
+            source_payload,
+            tracked_file,
+            run_id,
+            unit_key,
+            write_lakehouse_file,
+        )
+        staged["asset_key"] = snapshot.asset_key
+        return StagedAsset.from_dict(staged)
+
+    def write_pipeline_config(payload: dict[str, Any]) -> list[str]:
+        run_id = str(payload["run"]["run_id"])
+        config_paths: list[str] = []
+        for unit in wf.build_validation_units(payload["run"], list(payload.get("asset_snapshots", []))):
+            config_relative_path = f"Files/validation-service/runs/{run_id}/{unit['unit_key']}.pipeline_config.json"
+            config_payload = wf.build_pipeline_config_payload(
+                payload=payload,
+                asset_snapshots=unit["asset_snapshots"],
+                workspace_name=workspace_name,
+                lakehouse_name=lakehouse_name,
+                config_filepath=config_relative_path,
+                validation_target=unit["validation_target"],
+            )
+            write_text(config_relative_path, json.dumps(config_payload, indent=2))
+            config_paths.append(config_relative_path)
+        return config_paths
+
+    def pipeline_trigger(payload: dict[str, Any]):
+        if not pipeline_workspace_id or not pipeline_id:
+            return {
+                "pipeline_id": "example-fallback-pipeline",
+                "pipeline_run_id": f"fallback-{payload['run']['run_id']}",
+                "triggered_ts_utc": payload["run"]["requested_ts_utc"],
+                "external_metadata": {
+                    "pipeline_config_filepaths": [],
+                },
+            }
+        config_filepaths = write_pipeline_config(payload)
+        success, response_payload = trigger_fabric_pipeline(
+            pipeline_workspace_id,
+            pipeline_id,
+            parameters={
+                "workspace_name": workspace_name,
+                "lakehouse_name": lakehouse_name,
+                "config_filepath": config_filepaths,
+            },
+        )
+        require_ok("trigger_fabric_pipeline", success, response_payload)
+        raw_pipeline_run_id = (
+            response_payload.get("id")
+            or response_payload.get("jobInstanceId")
+            or response_payload.get("jobId")
+            or response_payload.get("runId")
+        )
+        pipeline_run_id = str(raw_pipeline_run_id).strip() if raw_pipeline_run_id is not None else ""
+        if pipeline_run_id.lower() == "none":
+            pipeline_run_id = ""
+        if not is_guid(pipeline_run_id):
+            pipeline_run_id = resolve_pipeline_run_id(str(payload["run"]["run_id"]))
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_run_id": pipeline_run_id,
+            "triggered_ts_utc": payload["status_history"][-1]["ts_utc"] if payload["status_history"] else payload["run"]["requested_ts_utc"],
+            "external_metadata": {
+                "pipeline_config_filepaths": config_filepaths,
+            },
+        }
 
     def resolve_pipeline_run_id(fallback_run_id: str) -> str:
         if not pipeline_workspace_id or not pipeline_id:
@@ -611,7 +413,7 @@ def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
         if not is_guid(pipeline_run_id):
             pipeline_run_id = resolve_pipeline_run_id(str(projection["run"]["run_id"]))
             if not is_guid(pipeline_run_id):
-                return {"status": "running"}
+                return {"status": "running", "pipeline_run_id": ""}
         success, response_payload = get_fabric_pipeline_run(
             pipeline_workspace_id,
             str(pipeline.pipeline_id or pipeline_id),
@@ -620,20 +422,31 @@ def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
         if not success and "JobInstanceNotFound" in str(response_payload):
             resolved_run_id = resolve_pipeline_run_id(str(projection["run"]["run_id"]))
             if not is_guid(resolved_run_id):
-                return {"status": "running"}
+                return {"status": "running", "pipeline_run_id": ""}
             success, response_payload = get_fabric_pipeline_run(
                 pipeline_workspace_id,
                 str(pipeline.pipeline_id or pipeline_id),
                 resolved_run_id,
             )
-        require_ok("get_fabric_pipeline_run", success, response_payload)
+            pipeline_run_id = resolved_run_id
+        if not success:
+            return {
+                "status": projection["run"]["state"],
+                "pipeline_run_id": pipeline_run_id,
+                "error": {
+                    "code": "PIPELINE_STATUS_FAILED",
+                    "message": str(response_payload),
+                },
+            }
         return {
             "status": str(response_payload.get("status") or response_payload.get("state") or "running").lower(),
+            "pipeline_run_id": pipeline_run_id,
             "error": response_payload.get("failureReason"),
         }
 
     return ValidationRunApi(
-        submission_resolver=lambda _submission_id: None,
+        submission_resolver=submission_resolver,
+        submission_flag_setter=submission_flag_setter,
         event_store=TextBackedRunEventStore(
             read_text=lambda: read_text(runs_events_path),
             write_text=lambda content: write_text(runs_events_path, content),
@@ -645,5 +458,7 @@ def build_run_api(config: dict[str, Any]) -> ValidationRunApi:
         runs_projection_store=TextBackedProjectionStore(
             write_text=lambda content: write_text(runs_projection_path, content),
         ),
+        asset_stager=asset_stager,
+        pipeline_trigger=pipeline_trigger,
         pipeline_status_resolver=pipeline_status_resolver,
     )

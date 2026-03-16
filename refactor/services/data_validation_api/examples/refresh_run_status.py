@@ -14,7 +14,13 @@ from common import (
     prompt_service_config,
     resolve_actor,
 )
-from refactor.services.data_validation_api import GetRunRequest, ListRunHistoryRequest, RefreshRunStatusRequest
+from refactor.services.data_validation_api import (
+    GetRunRequest,
+    ListRunHistoryRequest,
+    ListSubmissionsRequest,
+    RefreshRunStatusRequest,
+    RefreshSubmissionRequest,
+)
 
 
 def main():
@@ -27,7 +33,7 @@ def main():
 
     submission_service = build_submission_service(config["service"])
     run_api = build_run_api(config)
-    submissions_response = submission_service.list_submissions()
+    submissions_response = submission_service.list_submissions(ListSubmissionsRequest())
     result: dict[str, object] = {"list_submissions": submissions_response.to_dict()}
 
     submissions = submissions_response.data if submissions_response.ok else None
@@ -54,9 +60,11 @@ def main():
         result["selected_submission_id"] = selected_submission_id
         actor = resolve_actor(None)
         result["refresh_submission_hashes"] = submission_service.refresh_submission_hashes(
-            submission_id=selected_submission_id,
-            refreshed_by=actor,
-            idempotency_key=f"refresh-submission-hashes-{uuid4().hex}",
+            RefreshSubmissionRequest(
+                submission_id=selected_submission_id,
+                refreshed_by=actor,
+                idempotency_key=f"refresh-submission-hashes-{uuid4().hex}",
+            )
         ).to_dict()
 
         run_history = run_api.list_run_history(ListRunHistoryRequest(submission_id=selected_submission_id))

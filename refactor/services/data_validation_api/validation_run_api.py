@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ from refactor.services.data_validation_api.submission_service import (
     InMemoryIdempotencyStore,
     JsonFileIdempotencyStore,
     JsonProjectionStore,
+    OperationError,
+    SetValidationFlagsRequest,
     TextBackedIdempotencyStore,
     TextBackedProjectionStore,
     VALIDATION_NOT_VALIDATED,
@@ -170,6 +173,33 @@ class RunStatusError:
 
 
 @dataclass(frozen=True)
+class RunExternalMetadata:
+    pipeline_config_filepaths: list[str] = field(default_factory=list)
+    latest_external_status: str | None = None
+    last_status_sync_ts_utc: str | None = None
+    latest_error: RunStatusError | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pipeline_config_filepaths": list(self.pipeline_config_filepaths),
+            "latest_external_status": self.latest_external_status,
+            "last_status_sync_ts_utc": self.last_status_sync_ts_utc,
+            "latest_error": self.latest_error.to_dict() if self.latest_error else None,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "RunExternalMetadata":
+        data = payload or {}
+        latest_error = data.get("latest_error")
+        return cls(
+            pipeline_config_filepaths=[str(item) for item in data.get("pipeline_config_filepaths", [])],
+            latest_external_status=str(data["latest_external_status"]) if data.get("latest_external_status") is not None else None,
+            last_status_sync_ts_utc=str(data["last_status_sync_ts_utc"]) if data.get("last_status_sync_ts_utc") is not None else None,
+            latest_error=RunStatusError.from_dict(latest_error) if latest_error else None,
+        )
+
+
+@dataclass(frozen=True)
 class PlanRunRequest:
     submission_id: str
     requested_organisations: list[str] | None = None
@@ -186,9 +216,13 @@ class PlanRunResult:
     selected_asset_keys: list[str]
     asset_plan: list[dict[str, Any]]
     warnings: list[str] = field(default_factory=list)
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["error"] = self.error.to_dict() if self.error else None
+        return payload
 
 
 @dataclass(frozen=True)
@@ -205,11 +239,15 @@ class CreateRunRequest:
 class CreateRunResult:
     run: RunSummary
     asset_snapshots: list[AssetSnapshot]
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "run": self.run.to_dict(),
             "asset_snapshots": [item.to_dict() for item in self.asset_snapshots],
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -225,13 +263,17 @@ class StageRunInputsResult:
     state: str
     staged_assets: list[StagedAsset]
     errors: list[RunStatusError]
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "run_id": self.run_id,
             "state": self.state,
             "staged_assets": [item.to_dict() for item in self.staged_assets],
             "errors": [item.to_dict() for item in self.errors],
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -246,12 +288,18 @@ class TriggerRunResult:
     run_id: str
     state: str
     pipeline: PipelineRef
+    external_metadata: RunExternalMetadata | None = None
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "run_id": self.run_id,
             "state": self.state,
             "pipeline": self.pipeline.to_dict(),
+            "external_metadata": self.external_metadata.to_dict() if self.external_metadata else None,
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -266,13 +314,74 @@ class RefreshRunStatusResult:
     state: str
     pipeline_status: str
     latest_error: RunStatusError | None = None
+    external_metadata: RunExternalMetadata | None = None
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "run_id": self.run_id,
             "state": self.state,
             "pipeline_status": self.pipeline_status,
             "latest_error": self.latest_error.to_dict() if self.latest_error else None,
+            "external_metadata": self.external_metadata.to_dict() if self.external_metadata else None,
+            "error": self.error.to_dict() if self.error else None,
+        }
+
+
+@dataclass(frozen=True)
+class RefreshRunningRunsRequest:
+    submission_id: str | None = None
+    requested_by: str | None = None
+
+
+@dataclass(frozen=True)
+class RefreshRunningRunsResult:
+    items: list[RefreshRunStatusResult]
+    total: int
+    ok: bool = True
+    error: OperationError | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "items": [item.to_dict() for item in self.items],
+            "total": self.total,
+            "error": self.error.to_dict() if self.error else None,
+        }
+
+
+@dataclass(frozen=True)
+class PollRunRequest:
+    run_id: str
+    poll_interval_seconds: float = 10.0
+    timeout_seconds: float = 600.0
+
+
+@dataclass(frozen=True)
+class PollRunResult:
+    run_id: str
+    state: str
+    pipeline_status: str
+    latest_error: RunStatusError | None = None
+    external_metadata: RunExternalMetadata | None = None
+    polls: int = 0
+    timed_out: bool = False
+    ok: bool = True
+    error: OperationError | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "run_id": self.run_id,
+            "state": self.state,
+            "pipeline_status": self.pipeline_status,
+            "latest_error": self.latest_error.to_dict() if self.latest_error else None,
+            "external_metadata": self.external_metadata.to_dict() if self.external_metadata else None,
+            "polls": self.polls,
+            "timed_out": self.timed_out,
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -287,17 +396,23 @@ class GetRunResult:
     asset_snapshots: list[AssetSnapshot]
     staged_assets: list[StagedAsset]
     pipeline: PipelineRef | None
+    external_metadata: RunExternalMetadata | None
     status_history: list[dict[str, Any]]
     result_summary: dict[str, Any] | None
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "run": self.run.to_dict(),
             "asset_snapshots": [item.to_dict() for item in self.asset_snapshots],
             "staged_assets": [item.to_dict() for item in self.staged_assets],
             "pipeline": self.pipeline.to_dict() if self.pipeline else None,
+            "external_metadata": self.external_metadata.to_dict() if self.external_metadata else None,
             "status_history": self.status_history,
             "result_summary": self.result_summary,
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -316,13 +431,45 @@ class ListRunsResult:
     page: int
     page_size: int
     total: int
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "items": [item.to_dict() for item in self.items],
             "page": self.page,
             "page_size": self.page_size,
             "total": self.total,
+            "error": self.error.to_dict() if self.error else None,
+        }
+
+
+@dataclass(frozen=True)
+class ListRunningRunsRequest:
+    submission_id: str | None = None
+    requested_by: str | None = None
+    page: int = 1
+    page_size: int = 25
+
+
+@dataclass(frozen=True)
+class ListRunningRunsResult:
+    items: list[RunSummary]
+    page: int
+    page_size: int
+    total: int
+    ok: bool = True
+    error: OperationError | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "items": [item.to_dict() for item in self.items],
+            "page": self.page,
+            "page_size": self.page_size,
+            "total": self.total,
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -330,6 +477,7 @@ class ListRunsResult:
 class RunHistoryEntry:
     run: RunSummary
     pipeline: PipelineRef | None
+    external_metadata: RunExternalMetadata | None
     latest_error: RunStatusError | None
     status_history: list[dict[str, Any]]
     result_summary: dict[str, Any] | None
@@ -338,6 +486,7 @@ class RunHistoryEntry:
         return {
             "run": self.run.to_dict(),
             "pipeline": self.pipeline.to_dict() if self.pipeline else None,
+            "external_metadata": self.external_metadata.to_dict() if self.external_metadata else None,
             "latest_error": self.latest_error.to_dict() if self.latest_error else None,
             "status_history": self.status_history,
             "result_summary": self.result_summary,
@@ -359,13 +508,17 @@ class ListRunHistoryResult:
     page: int
     page_size: int
     total: int
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
             "items": [item.to_dict() for item in self.items],
             "page": self.page,
             "page_size": self.page_size,
             "total": self.total,
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -383,9 +536,13 @@ class FinalizeRunResult:
     state: str
     result_summary: dict[str, Any]
     submission_update: dict[str, Any] | None = None
+    ok: bool = True
+    error: OperationError | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["error"] = self.error.to_dict() if self.error else None
+        return payload
 
 
 @dataclass(frozen=True)
@@ -469,6 +626,8 @@ class TextBackedRunEventStore:
 
 
 class ValidationRunApi:
+    ACTIVE_RUN_STATES = {"queued", "staged", "running"}
+
     def __init__(
         self,
         submission_resolver: Callable[[str], dict[str, Any] | None],
@@ -499,29 +658,71 @@ class ValidationRunApi:
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._id_fn = id_fn or (lambda: uuid4().hex)
 
+    @staticmethod
+    def _operation_error(code: str, message: str, details: dict[str, Any] | None = None) -> OperationError:
+        return OperationError(code=code, message=message, details=details)
+
+    @classmethod
+    def _normalize_public_error(
+        cls,
+        exc: Exception,
+        *,
+        default_code: str,
+        details: dict[str, Any] | None = None,
+    ) -> OperationError:
+        message = str(exc)
+        code = default_code
+        if "Idempotency key was already used" in message:
+            code = "IDEMPOTENCY_CONFLICT"
+        elif "Submission '" in message and "was not found" in message:
+            code = "SUBMISSION_NOT_FOUND"
+        elif "Run '" in message and "was not found" in message:
+            code = "RUN_NOT_FOUND"
+        elif "is not ready to trigger" in message:
+            code = "RUN_NOT_READY"
+        elif message.startswith("PIPELINE_TRIGGER_FAILED"):
+            code = "PIPELINE_TRIGGER_FAILED"
+        elif "Organisation '" in message and "does not exist in submission" in message:
+            code = "ORG_NOT_IN_SUBMISSION"
+        elif "Template '" in message and "does not exist in submission" in message:
+            code = "TEMPLATE_NOT_IN_SUBMISSION"
+        return cls._operation_error(code, message, details=details)
+
     def plan_run(self, request: PlanRunRequest) -> PlanRunResult:
-        submission = self._require_submission(request.submission_id)
-        selected_orgs, selected_templates, asset_rows = self._resolve_scope(
-            submission=submission,
-            requested_organisations=request.requested_organisations,
-            requested_template_keys=request.requested_template_keys,
-            requested_asset_keys=request.requested_asset_keys,
-        )
-        asset_plan = [
-            {
-                "asset_key": row["asset_key"],
-                "status": self._asset_plan_status(row, request.force_revalidate),
-            }
-            for row in asset_rows
-        ]
-        return PlanRunResult(
-            submission_id=request.submission_id,
-            selected_organisations=selected_orgs,
-            selected_templates=selected_templates,
-            selected_asset_keys=[row["asset_key"] for row in asset_rows],
-            asset_plan=asset_plan,
-            warnings=[],
-        )
+        try:
+            submission = self._require_submission(request.submission_id)
+            selected_orgs, selected_templates, asset_rows = self._resolve_scope(
+                submission=submission,
+                requested_organisations=request.requested_organisations,
+                requested_template_keys=request.requested_template_keys,
+                requested_asset_keys=request.requested_asset_keys,
+            )
+            asset_plan = [
+                {
+                    "asset_key": row["asset_key"],
+                    "status": self._asset_plan_status(row, request.force_revalidate),
+                }
+                for row in asset_rows
+            ]
+            return PlanRunResult(
+                submission_id=request.submission_id,
+                selected_organisations=selected_orgs,
+                selected_templates=selected_templates,
+                selected_asset_keys=[row["asset_key"] for row in asset_rows],
+                asset_plan=asset_plan,
+                warnings=[],
+            )
+        except Exception as exc:
+            return PlanRunResult(
+                submission_id=request.submission_id,
+                selected_organisations=[],
+                selected_templates=[],
+                selected_asset_keys=[],
+                asset_plan=[],
+                warnings=[],
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="VALIDATION_ERROR", details={"submission_id": request.submission_id}),
+            )
 
     def create_run(self, request: CreateRunRequest) -> CreateRunResult:
         payload = {
@@ -531,59 +732,77 @@ class ValidationRunApi:
             "requested_template_keys": request.requested_template_keys,
             "requested_asset_keys": request.requested_asset_keys,
         }
-        cached = self._get_idempotent("create_run", request.requested_by, request.idempotency_key, payload)
-        if cached is not None:
-            return self._to_create_run_result(self._require_run_projection(str(cached["run_id"])))
+        try:
+            cached = self._get_idempotent("create_run", request.requested_by, request.idempotency_key, payload)
+            if cached is not None:
+                return self._to_create_run_result(self._require_run_projection(str(cached["run_id"])))
 
-        submission = self._require_submission(request.submission_id)
-        selected_orgs, selected_templates, asset_rows = self._resolve_scope(
-            submission=submission,
-            requested_organisations=request.requested_organisations,
-            requested_template_keys=request.requested_template_keys,
-            requested_asset_keys=request.requested_asset_keys,
-        )
-        run_id = self._id_fn()
-        now_iso = self._utc_now_iso()
-        run = RunSummary(
-            run_id=run_id,
-            submission_id=request.submission_id,
-            process_cd=str(submission["process_cd"]),
-            submission_period_cd=str(submission["submission_period_cd"]),
-            requested_by=request.requested_by,
-            requested_ts_utc=now_iso,
-            state="queued",
-            selected_organisations=selected_orgs,
-            selected_templates=selected_templates,
-            selected_asset_keys=[row["asset_key"] for row in asset_rows],
-        )
-        asset_snapshots = [self._to_asset_snapshot(row) for row in asset_rows]
-        self._append_event(
-            "run_created",
-            run_id=run_id,
-            submission_id=request.submission_id,
-            actor=request.requested_by,
-            payload_json={
-                "run": run.to_dict(),
-                "asset_snapshots": [item.to_dict() for item in asset_snapshots],
-                "status_entry": {
-                    "ts_utc": now_iso,
-                    "state": "queued",
-                    "actor": request.requested_by,
+            submission = self._require_submission(request.submission_id)
+            selected_orgs, selected_templates, asset_rows = self._resolve_scope(
+                submission=submission,
+                requested_organisations=request.requested_organisations,
+                requested_template_keys=request.requested_template_keys,
+                requested_asset_keys=request.requested_asset_keys,
+            )
+            run_id = self._id_fn()
+            now_iso = self._utc_now_iso()
+            run = RunSummary(
+                run_id=run_id,
+                submission_id=request.submission_id,
+                process_cd=str(submission["process_cd"]),
+                submission_period_cd=str(submission["submission_period_cd"]),
+                requested_by=request.requested_by,
+                requested_ts_utc=now_iso,
+                state="queued",
+                selected_organisations=selected_orgs,
+                selected_templates=selected_templates,
+                selected_asset_keys=[row["asset_key"] for row in asset_rows],
+            )
+            asset_snapshots = [self._to_asset_snapshot(row) for row in asset_rows]
+            self._append_event(
+                "run_created",
+                run_id=run_id,
+                submission_id=request.submission_id,
+                actor=request.requested_by,
+                payload_json={
+                    "run": run.to_dict(),
+                    "asset_snapshots": [item.to_dict() for item in asset_snapshots],
+                    "status_entry": {
+                        "ts_utc": now_iso,
+                        "state": "queued",
+                        "actor": request.requested_by,
+                    },
                 },
-            },
-        )
-        self._write_projection_file()
-        self._store_idempotency(
-            "create_run",
-            request.requested_by,
-            request.idempotency_key,
-            payload,
-            {"run_id": run_id},
-        )
-        return self._to_create_run_result(self._require_run_projection(run_id))
+            )
+            self._write_projection_file()
+            self._store_idempotency(
+                "create_run",
+                request.requested_by,
+                request.idempotency_key,
+                payload,
+                {"run_id": run_id},
+            )
+            return self._to_create_run_result(self._require_run_projection(run_id))
+        except Exception as exc:
+            return CreateRunResult(
+                run=RunSummary("", request.submission_id, "", "", request.requested_by, "", "failed", [], [], []),
+                asset_snapshots=[],
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="VALIDATION_ERROR", details={"submission_id": request.submission_id}),
+            )
 
     def stage_run_inputs(self, request: StageRunInputsRequest) -> StageRunInputsResult:
-        projection = self._require_run_projection(request.run_id)
+        try:
+            projection = self._require_run_projection(request.run_id)
+        except Exception as exc:
+            return StageRunInputsResult(
+                run_id=request.run_id,
+                state="failed",
+                staged_assets=[],
+                errors=[],
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="RUN_NOT_FOUND", details={"run_id": request.run_id}),
+            )
         staged_assets: list[StagedAsset] = []
         errors: list[RunStatusError] = []
         for snapshot_payload in projection["asset_snapshots"]:
@@ -631,28 +850,69 @@ class ValidationRunApi:
         )
 
     def trigger_run(self, request: TriggerRunRequest) -> TriggerRunResult:
-        projection = self._require_run_projection(request.run_id)
-        if projection["run"]["state"] not in {"staged", "partially_succeeded"}:
-            raise ValueError(f"Run '{request.run_id}' is not ready to trigger.")
-        pipeline = self._trigger_pipeline(projection)
-        self._append_state_event(
-            event_type="pipeline_triggered",
-            run_id=request.run_id,
-            submission_id=projection["run"]["submission_id"],
-            actor=request.triggered_by,
-            state="running",
-            payload_json={"pipeline": pipeline.to_dict()},
-        )
-        self._write_projection_file()
-        updated = self._require_run_projection(request.run_id)
-        return TriggerRunResult(
-            run_id=request.run_id,
-            state=updated["run"]["state"],
-            pipeline=PipelineRef.from_dict(updated["pipeline"]),
-        )
+        try:
+            projection = self._require_run_projection(request.run_id)
+            if projection["run"]["state"] not in {"staged", "partially_succeeded"}:
+                raise ValueError(f"Run '{request.run_id}' is not ready to trigger.")
+            try:
+                triggered_payload = self._trigger_pipeline(projection)
+            except Exception as exc:
+                self._append_event(
+                    "pipeline_trigger_failed",
+                    run_id=request.run_id,
+                    submission_id=projection["run"]["submission_id"],
+                    actor=request.triggered_by,
+                    payload_json={
+                        "error": self._normalize_external_error(exc, "PIPELINE_TRIGGER_FAILED"),
+                    },
+                )
+                self._write_projection_file()
+                raise RuntimeError(f"PIPELINE_TRIGGER_FAILED: {exc}") from exc
+            pipeline = triggered_payload if isinstance(triggered_payload, PipelineRef) else PipelineRef.from_dict(triggered_payload)
+            self._append_state_event(
+                event_type="pipeline_triggered",
+                run_id=request.run_id,
+                submission_id=projection["run"]["submission_id"],
+                actor=request.triggered_by,
+                state="running",
+                payload_json={
+                    "pipeline": pipeline.to_dict(),
+                    "external_metadata": self._normalize_external_metadata(
+                        triggered_payload if isinstance(triggered_payload, dict) else None
+                    ).to_dict(),
+                },
+            )
+            self._write_projection_file()
+            updated = self._require_run_projection(request.run_id)
+            return TriggerRunResult(
+                run_id=request.run_id,
+                state=updated["run"]["state"],
+                pipeline=PipelineRef.from_dict(updated["pipeline"]),
+                external_metadata=RunExternalMetadata.from_dict(updated["external_metadata"]),
+            )
+        except Exception as exc:
+            return TriggerRunResult(
+                run_id=request.run_id,
+                state="failed",
+                pipeline=PipelineRef(pipeline_id=self._pipeline_id, pipeline_run_id="", triggered_ts_utc=""),
+                external_metadata=None,
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="PIPELINE_TRIGGER_FAILED", details={"run_id": request.run_id}),
+            )
 
     def refresh_run_status(self, request: RefreshRunStatusRequest) -> RefreshRunStatusResult:
-        projection = self._require_run_projection(request.run_id)
+        try:
+            projection = self._require_run_projection(request.run_id)
+        except Exception as exc:
+            return RefreshRunStatusResult(
+                run_id=request.run_id,
+                state="failed",
+                pipeline_status="failed",
+                latest_error=None,
+                external_metadata=None,
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="RUN_NOT_FOUND", details={"run_id": request.run_id}),
+            )
         pipeline_payload = projection.get("pipeline")
         if not pipeline_payload:
             latest_error = projection["latest_errors"][-1] if projection["latest_errors"] else None
@@ -661,12 +921,27 @@ class ValidationRunApi:
                 state=projection["run"]["state"],
                 pipeline_status=projection["run"]["state"],
                 latest_error=RunStatusError.from_dict(latest_error) if latest_error else None,
+                external_metadata=RunExternalMetadata.from_dict(projection.get("external_metadata")),
             )
 
         pipeline = PipelineRef.from_dict(pipeline_payload)
-        observed = self._resolve_pipeline_status(pipeline, projection)
+        try:
+            observed = self._resolve_pipeline_status(pipeline, projection)
+        except Exception as exc:
+            observed = {
+                "status": projection["run"]["state"],
+                "error": self._normalize_external_error(exc, "PIPELINE_STATUS_FAILED").to_dict(),
+            }
         observed_status = str(observed.get("status") or projection["run"]["state"]).strip().lower()
         next_state = self._map_pipeline_status_to_run_state(observed_status, projection["run"]["state"])
+        observed_error = observed.get("error")
+        observed_pipeline_run_id = str(observed.get("pipeline_run_id") or "").strip() or None
+        external_metadata = RunExternalMetadata(
+            pipeline_config_filepaths=RunExternalMetadata.from_dict(projection.get("external_metadata")).pipeline_config_filepaths,
+            latest_external_status=observed_status,
+            last_status_sync_ts_utc=self._utc_now_iso(),
+            latest_error=RunStatusError.from_dict(observed_error) if observed_error else None,
+        )
         self._append_state_event(
             event_type="status_polled",
             run_id=request.run_id,
@@ -675,9 +950,21 @@ class ValidationRunApi:
             state=next_state,
             payload_json={
                 "pipeline_status": observed_status,
-                "error": observed.get("error"),
+                "error": observed_error,
+                "pipeline": (
+                    {
+                        **pipeline.to_dict(),
+                        "pipeline_run_id": observed_pipeline_run_id,
+                    }
+                    if observed_pipeline_run_id and observed_pipeline_run_id != pipeline.pipeline_run_id
+                    else None
+                ),
+                "external_metadata": external_metadata.to_dict(),
             },
         )
+        latest_projection = self._require_run_projection(request.run_id)
+        if next_state == "succeeded" and latest_projection["result_summary"] is None:
+            self._auto_finalize_successful_run(latest_projection)
         self._write_projection_file()
         updated = self._require_run_projection(request.run_id)
         latest_error = updated["latest_errors"][-1] if updated["latest_errors"] else None
@@ -686,10 +973,97 @@ class ValidationRunApi:
             state=updated["run"]["state"],
             pipeline_status=observed_status,
             latest_error=RunStatusError.from_dict(latest_error) if latest_error else None,
+            external_metadata=RunExternalMetadata.from_dict(updated.get("external_metadata")),
+            ok=not (
+                isinstance(observed_error, dict)
+                and str(observed_error.get("code") or "") == "PIPELINE_STATUS_FAILED"
+            ),
+            error=(
+                self._operation_error(
+                    "PIPELINE_STATUS_FAILED",
+                    str(observed_error.get("message") or "Failed to refresh pipeline status."),
+                    {"run_id": request.run_id},
+                )
+                if isinstance(observed_error, dict)
+                and str(observed_error.get("code") or "") == "PIPELINE_STATUS_FAILED"
+                else None
+            ),
         )
 
+    def poll_run(self, request: PollRunRequest) -> PollRunResult:
+        deadline = time.monotonic() + max(request.timeout_seconds, 0.0)
+        polls = 0
+        latest = self.refresh_run_status(RefreshRunStatusRequest(run_id=request.run_id))
+        if not latest.ok:
+            return PollRunResult(
+                run_id=request.run_id,
+                state=latest.state,
+                pipeline_status=latest.pipeline_status,
+                latest_error=latest.latest_error,
+                external_metadata=latest.external_metadata,
+                polls=1,
+                timed_out=False,
+                ok=False,
+                error=latest.error,
+            )
+        polls += 1
+        while latest.state not in {"succeeded", "failed", "cancelled", "canceled", "partially_succeeded"}:
+            if time.monotonic() >= deadline:
+                return PollRunResult(
+                    run_id=request.run_id,
+                    state=latest.state,
+                    pipeline_status=latest.pipeline_status,
+                    latest_error=latest.latest_error,
+                    external_metadata=latest.external_metadata,
+                    polls=polls,
+                    timed_out=True,
+                    ok=False,
+                    error=self._operation_error("TIMEOUT", f"Polling timed out for run '{request.run_id}'.", {"run_id": request.run_id}),
+                )
+            if request.poll_interval_seconds > 0:
+                time.sleep(request.poll_interval_seconds)
+            latest = self.refresh_run_status(RefreshRunStatusRequest(run_id=request.run_id))
+            polls += 1
+        return PollRunResult(
+            run_id=request.run_id,
+            state=latest.state,
+            pipeline_status=latest.pipeline_status,
+            latest_error=latest.latest_error,
+            external_metadata=latest.external_metadata,
+            polls=polls,
+            timed_out=False,
+        )
+
+    def refresh_running_runs(self, request: RefreshRunningRunsRequest) -> RefreshRunningRunsResult:
+        running = self.list_running_runs(
+            ListRunningRunsRequest(
+                submission_id=request.submission_id,
+                requested_by=request.requested_by,
+                page=1,
+                page_size=10_000,
+            )
+        )
+        items = [
+            self.refresh_run_status(RefreshRunStatusRequest(run_id=item.run_id))
+            for item in running.items
+        ]
+        return RefreshRunningRunsResult(items=items, total=len(items))
+
     def get_run(self, request: GetRunRequest) -> GetRunResult:
-        return self._to_get_run_result(self._require_run_projection(request.run_id))
+        try:
+            return self._to_get_run_result(self._require_run_projection(request.run_id))
+        except Exception as exc:
+            return GetRunResult(
+                run=RunSummary(request.run_id, "", "", "", "", "", "failed", [], [], []),
+                asset_snapshots=[],
+                staged_assets=[],
+                pipeline=None,
+                external_metadata=None,
+                status_history=[],
+                result_summary=None,
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="RUN_NOT_FOUND", details={"run_id": request.run_id}),
+            )
 
     def list_runs(self, request: ListRunsRequest) -> ListRunsResult:
         items = [
@@ -699,9 +1073,23 @@ class ValidationRunApi:
             and (request.state is None or item["run"]["state"] == request.state)
             and (request.requested_by is None or item["run"]["requested_by"] == request.requested_by)
         ]
+        items.sort(key=lambda item: (item.requested_ts_utc, item.run_id), reverse=True)
         start = max(request.page - 1, 0) * request.page_size
         end = start + request.page_size
         return ListRunsResult(items=items[start:end], page=request.page, page_size=request.page_size, total=len(items))
+
+    def list_running_runs(self, request: ListRunningRunsRequest) -> ListRunningRunsResult:
+        items = [
+            RunSummary.from_dict(item["run"])
+            for item in self._project_runs()
+            if item["run"]["state"] in self.ACTIVE_RUN_STATES
+            and (request.submission_id is None or item["run"]["submission_id"] == request.submission_id)
+            and (request.requested_by is None or item["run"]["requested_by"] == request.requested_by)
+        ]
+        items.sort(key=lambda item: (item.requested_ts_utc, item.run_id), reverse=True)
+        start = max(request.page - 1, 0) * request.page_size
+        end = start + request.page_size
+        return ListRunningRunsResult(items=items[start:end], page=request.page, page_size=request.page_size, total=len(items))
 
     def list_run_history(self, request: ListRunHistoryRequest) -> ListRunHistoryResult:
         items = [
@@ -711,12 +1099,23 @@ class ValidationRunApi:
             and (request.state is None or item["run"]["state"] == request.state)
             and (request.requested_by is None or item["run"]["requested_by"] == request.requested_by)
         ]
+        items.sort(key=lambda item: (item.run.requested_ts_utc, item.run.run_id), reverse=True)
         start = max(request.page - 1, 0) * request.page_size
         end = start + request.page_size
         return ListRunHistoryResult(items=items[start:end], page=request.page, page_size=request.page_size, total=len(items))
 
     def finalize_run(self, request: FinalizeRunRequest) -> FinalizeRunResult:
-        projection = self._require_run_projection(request.run_id)
+        try:
+            projection = self._require_run_projection(request.run_id)
+        except Exception as exc:
+            return FinalizeRunResult(
+                run_id=request.run_id,
+                state="failed",
+                result_summary={},
+                submission_update=None,
+                ok=False,
+                error=self._normalize_public_error(exc, default_code="RUN_NOT_FOUND", details={"run_id": request.run_id}),
+            )
         asset_results = request.result_payload.get("asset_results", [])
         passed_asset_keys = sorted(str(item["asset_key"]) for item in asset_results if item.get("status") == "passed")
         failed_asset_keys = sorted(str(item["asset_key"]) for item in asset_results if item.get("status") != "passed")
@@ -745,16 +1144,30 @@ class ValidationRunApi:
                 failed_asset_keys=failed_asset_keys,
             )
             response = self._submission_flag_setter(
-                projection["run"]["submission_id"],
-                organisation_changes or None,
-                template_changes or None,
-                request.finalized_by,
-                f"finalize-run-{request.run_id}-{self._hash_payload(result_summary)}",
-                f"Finalize validation run {request.run_id}",
+                SetValidationFlagsRequest(
+                    submission_id=projection["run"]["submission_id"],
+                    organisation_changes=organisation_changes or None,
+                    template_changes=template_changes or None,
+                    modified_by=request.finalized_by,
+                    idempotency_key=f"finalize-run-{request.run_id}-{self._hash_payload(result_summary)}",
+                    reason=f"Finalize validation run {request.run_id}",
+                    validation_run_id=request.run_id,
+                )
             )
             if hasattr(response, "ok") and not getattr(response, "ok"):
                 error = getattr(response, "error", None)
-                raise ValueError(getattr(error, "message", "Failed to apply validation flags."))
+                return FinalizeRunResult(
+                    run_id=request.run_id,
+                    state="failed",
+                    result_summary=result_summary,
+                    submission_update=None,
+                    ok=False,
+                    error=self._operation_error(
+                        "RUN_FINALIZATION_FAILED",
+                        getattr(error, "message", "Failed to apply validation flags."),
+                        {"run_id": request.run_id},
+                    ),
+                )
             submission_data = getattr(response, "data", None) if response is not None else None
             if submission_data:
                 submission_update = {
@@ -769,6 +1182,30 @@ class ValidationRunApi:
             state=updated["run"]["state"],
             result_summary=updated["result_summary"] or result_summary,
             submission_update=submission_update,
+        )
+
+    def _auto_finalize_successful_run(self, projection: dict[str, Any]):
+        passed_asset_keys = sorted(str(item["asset_key"]) for item in projection["asset_snapshots"])
+        result_summary = {
+            "passed_asset_keys": passed_asset_keys,
+            "failed_asset_keys": [],
+        }
+        self._append_state_event(
+            event_type="run_finalized",
+            run_id=str(projection["run"]["run_id"]),
+            submission_id=str(projection["run"]["submission_id"]),
+            actor="system",
+            state="succeeded",
+            payload_json={
+                "result_summary": result_summary,
+                "result_payload": {
+                    "asset_results": [
+                        {"asset_key": asset_key, "status": "passed"}
+                        for asset_key in passed_asset_keys
+                    ]
+                },
+                "auto_finalized": True,
+            },
         )
 
     def _require_submission(self, submission_id: str) -> dict[str, Any]:
@@ -788,6 +1225,7 @@ class ValidationRunApi:
                     "asset_snapshots": [],
                     "staged_assets": [],
                     "pipeline": None,
+                    "external_metadata": RunExternalMetadata().to_dict(),
                     "status_history": [],
                     "result_summary": None,
                     "latest_errors": [],
@@ -809,13 +1247,25 @@ class ValidationRunApi:
             elif event.event_type == "asset_stage_failed":
                 if payload.get("error"):
                     run["latest_errors"].append(payload["error"])
+            elif event.event_type == "pipeline_trigger_failed":
+                if payload.get("error"):
+                    run["latest_errors"].append(payload["error"])
+                    run["external_metadata"] = {
+                        **run["external_metadata"],
+                        "latest_error": payload["error"],
+                    }
             elif event.event_type in {"run_staging_completed", "pipeline_triggered", "status_polled", "run_finalized"}:
                 run["run"] = {**run["run"], "state": str(payload.get("state") or run["run"]["state"])}
                 status_entry = payload.get("status_entry")
                 if status_entry:
                     run["status_history"].append(status_entry)
-                if event.event_type == "pipeline_triggered":
+                if payload.get("pipeline"):
                     run["pipeline"] = payload.get("pipeline")
+                if payload.get("external_metadata"):
+                    run["external_metadata"] = {
+                        **run["external_metadata"],
+                        **payload["external_metadata"],
+                    }
                 if event.event_type == "run_staging_completed":
                     run["latest_errors"] = payload.get("errors", run["latest_errors"])
                 elif payload.get("error"):
@@ -902,7 +1352,7 @@ class ValidationRunApi:
         staged = self._asset_stager(snapshot, run_id)
         return staged if isinstance(staged, StagedAsset) else StagedAsset.from_dict(staged)
 
-    def _trigger_pipeline(self, projection: dict[str, Any]) -> PipelineRef:
+    def _trigger_pipeline(self, projection: dict[str, Any]) -> PipelineRef | dict[str, Any]:
         if self._pipeline_trigger is None:
             return PipelineRef(
                 pipeline_id=self._pipeline_id,
@@ -916,13 +1366,37 @@ class ValidationRunApi:
             "status_history": projection["status_history"],
         }
         triggered = self._pipeline_trigger(payload)
-        return triggered if isinstance(triggered, PipelineRef) else PipelineRef.from_dict(triggered)
+        return triggered
 
     def _resolve_pipeline_status(self, pipeline: PipelineRef, projection: dict[str, Any]) -> dict[str, Any]:
         if self._pipeline_status_resolver is None:
             return {"status": projection["run"]["state"]}
         observed = self._pipeline_status_resolver(pipeline, projection)
         return {"status": observed} if isinstance(observed, str) else observed
+
+    @staticmethod
+    def _normalize_external_error(payload: Any, default_code: str) -> RunStatusError:
+        if isinstance(payload, RunStatusError):
+            return payload
+        if isinstance(payload, dict):
+            return RunStatusError(
+                code=str(payload.get("code") or default_code),
+                message=str(payload.get("message") or payload),
+            )
+        return RunStatusError(code=default_code, message=str(payload))
+
+    @classmethod
+    def _normalize_external_metadata(cls, payload: dict[str, Any] | None) -> RunExternalMetadata:
+        if not payload:
+            return RunExternalMetadata()
+        raw = payload.get("external_metadata") if "external_metadata" in payload else payload
+        latest_error = raw.get("latest_error")
+        return RunExternalMetadata(
+            pipeline_config_filepaths=[str(item) for item in raw.get("pipeline_config_filepaths", [])],
+            latest_external_status=str(raw["latest_external_status"]) if raw.get("latest_external_status") is not None else None,
+            last_status_sync_ts_utc=str(raw["last_status_sync_ts_utc"]) if raw.get("last_status_sync_ts_utc") is not None else None,
+            latest_error=cls._normalize_external_error(latest_error, "EXTERNAL_DATA_ERROR") if latest_error else None,
+        )
 
     def _to_create_run_result(self, projection: dict[str, Any]) -> CreateRunResult:
         return CreateRunResult(
@@ -936,6 +1410,7 @@ class ValidationRunApi:
             asset_snapshots=[AssetSnapshot.from_dict(item) for item in projection["asset_snapshots"]],
             staged_assets=[StagedAsset.from_dict(item) for item in projection["staged_assets"]],
             pipeline=PipelineRef.from_dict(projection["pipeline"]) if projection["pipeline"] else None,
+            external_metadata=RunExternalMetadata.from_dict(projection.get("external_metadata")),
             status_history=projection["status_history"],
             result_summary=projection["result_summary"],
         )
@@ -945,6 +1420,7 @@ class ValidationRunApi:
         return RunHistoryEntry(
             run=RunSummary.from_dict(projection["run"]),
             pipeline=PipelineRef.from_dict(projection["pipeline"]) if projection["pipeline"] else None,
+            external_metadata=RunExternalMetadata.from_dict(projection.get("external_metadata")),
             latest_error=RunStatusError.from_dict(latest_error) if latest_error else None,
             status_history=list(projection["status_history"]),
             result_summary=projection["result_summary"],
@@ -1099,11 +1575,11 @@ class ValidationRunApi:
             return "queued"
         if pipeline_status in {"inprogress", "running"}:
             return "running"
-        if pipeline_status == "succeeded":
+        if pipeline_status in {"succeeded", "completed"}:
             return "succeeded"
         if pipeline_status in {"failed", "error"}:
             return "failed"
-        if pipeline_status == "cancelled":
+        if pipeline_status in {"cancelled", "canceled"}:
             return "cancelled"
         return current_state
 

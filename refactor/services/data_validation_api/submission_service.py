@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -27,7 +27,7 @@ SUBMISSION_EDIT_EVENT_TYPES = {
 
 
 @dataclass(frozen=True)
-class ApiError:
+class OperationError:
     code: str
     message: str
     details: dict[str, Any] | None = None
@@ -37,18 +37,140 @@ class ApiError:
 
 
 @dataclass(frozen=True)
-class ApiResponse:
+class ListSubmissionsRequest:
+    process_cd: str | None = None
+    submission_period_cd: str | None = None
+    state: str | None = None
+    created_by: str | None = None
+
+
+@dataclass(frozen=True)
+class CreateSubmissionRequest:
+    process_cd: str
+    submission_period_cd: str
+    organisations: dict[str, dict[str, Any] | "OrganisationSubmissionRef" | "SharePointSourceRef"]
+    templates: dict[str, dict[str, Any] | "TemplateSubmissionRef"] | None
+    created_by: str
+    idempotency_key: str
+    note: str | None = None
+    allow_duplicate_active: bool = False
+
+
+@dataclass(frozen=True)
+class EditSubmissionRequest:
+    submission_id: str
+    modified_by: str
+    idempotency_key: str
+    organisation_upserts: dict[str, dict[str, Any] | "OrganisationSubmissionRef" | "SharePointSourceRef"] | None = None
+    organisation_removals: list[str] | None = None
+    template_upserts: dict[str, dict[str, Any] | "TemplateSubmissionRef"] | None = None
+    template_removals: list[str] | None = None
+    organisation_validation_changes: dict[str, str] | None = None
+    template_validation_changes: dict[str, str] | None = None
+    note: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RefreshSubmissionRequest:
+    submission_id: str
+    refreshed_by: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class SetValidationFlagsRequest:
+    submission_id: str
+    organisation_changes: dict[str, str] | None
+    template_changes: dict[str, str] | None
+    modified_by: str
+    idempotency_key: str
+    reason: str | None = None
+    validation_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ListSubmissionHistoryRequest:
+    submission_id: str
+    actor: str | None = None
+    include_run_events: bool = False
+
+
+@dataclass(frozen=True)
+class ListEditHistoryRequest:
+    submission_id: str
+    actor: str | None = None
+
+
+@dataclass(frozen=True)
+class ListSubmissionsResult:
     ok: bool
-    data: dict[str, Any] | list[dict[str, Any]] | None
-    error: ApiError | None
-    correlation_id: str
+    items: list[dict[str, Any]] = field(default_factory=list)
+    error: OperationError | None = None
+
+    @property
+    def data(self) -> list[dict[str, Any]]:
+        return self.items
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
-            "data": self.data,
+            "items": self.items,
             "error": self.error.to_dict() if self.error else None,
-            "correlation_id": self.correlation_id,
+        }
+
+
+@dataclass(frozen=True)
+class SubmissionMutationResult:
+    ok: bool
+    submission: dict[str, Any] | None = None
+    error: OperationError | None = None
+
+    @property
+    def data(self) -> dict[str, Any] | None:
+        return self.submission
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "submission": self.submission,
+            "error": self.error.to_dict() if self.error else None,
+        }
+
+
+@dataclass(frozen=True)
+class ListSubmissionHistoryResult:
+    ok: bool
+    items: list[dict[str, Any]] = field(default_factory=list)
+    error: OperationError | None = None
+
+    @property
+    def data(self) -> list[dict[str, Any]]:
+        return self.items
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "items": self.items,
+            "error": self.error.to_dict() if self.error else None,
+        }
+
+
+@dataclass(frozen=True)
+class ListEditHistoryResult:
+    ok: bool
+    items: list[dict[str, Any]] = field(default_factory=list)
+    error: OperationError | None = None
+
+    @property
+    def data(self) -> list[dict[str, Any]]:
+        return self.items
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "items": self.items,
+            "error": self.error.to_dict() if self.error else None,
         }
 
 
@@ -59,6 +181,7 @@ class TrackedFileRef:
     watch_search_term: str | None = None
     current_hash: str | None = None
     validated_hash: str | None = None
+    validation_run_id: str | None = None
     size_bytes: int | None = None
     created: str | None = None
     modified: str | None = None
@@ -77,6 +200,7 @@ class TrackedFileRef:
             watch_search_term=str(payload["watch_search_term"]).strip() if payload.get("watch_search_term") else None,
             current_hash=str(payload["current_hash"]).strip() if payload.get("current_hash") else None,
             validated_hash=str(payload["validated_hash"]).strip() if payload.get("validated_hash") else None,
+            validation_run_id=str(payload["validation_run_id"]).strip() if payload.get("validation_run_id") else None,
             size_bytes=int(payload["size_bytes"]) if payload.get("size_bytes") is not None else None,
             created=str(payload["created"]).strip() if payload.get("created") else None,
             modified=str(payload["modified"]).strip() if payload.get("modified") else None,
@@ -274,12 +398,12 @@ class TextBackedSubmissionEventStore:
 
 class InMemoryIdempotencyStore:
     def __init__(self):
-        self._entries: dict[tuple[str, str, str], tuple[str, ApiResponse]] = {}
+        self._entries: dict[tuple[str, str, str], tuple[str, Any]] = {}
 
-    def get(self, operation: str, actor: str, key: str) -> tuple[str, ApiResponse] | None:
+    def get(self, operation: str, actor: str, key: str) -> tuple[str, Any] | None:
         return self._entries.get((operation, actor, key))
 
-    def set(self, operation: str, actor: str, key: str, request_hash: str, response: ApiResponse):
+    def set(self, operation: str, actor: str, key: str, request_hash: str, response: Any):
         self._entries[(operation, actor, key)] = (request_hash, response)
 
 
@@ -288,23 +412,18 @@ class JsonFileIdempotencyStore:
         self._store_path = Path(store_path)
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def get(self, operation: str, actor: str, key: str) -> tuple[str, ApiResponse] | None:
+    def get(self, operation: str, actor: str, key: str) -> tuple[str, Any] | None:
         entries = self._load()
         payload = entries.get(self._entry_key(operation, actor, key))
         if not payload:
             return None
-        return payload["request_hash"], ApiResponse(
-            ok=payload["response"]["ok"],
-            data=payload["response"]["data"],
-            error=ApiError(**payload["response"]["error"]) if payload["response"]["error"] else None,
-            correlation_id=payload["response"]["correlation_id"],
-        )
+        return payload["request_hash"], payload["response"]
 
-    def set(self, operation: str, actor: str, key: str, request_hash: str, response: ApiResponse):
+    def set(self, operation: str, actor: str, key: str, request_hash: str, response: Any):
         entries = self._load()
         entries[self._entry_key(operation, actor, key)] = {
             "request_hash": request_hash,
-            "response": response.to_dict(),
+            "response": self._serialize_response(response),
         }
         self._store_path.write_text(json.dumps(entries, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -317,6 +436,18 @@ class JsonFileIdempotencyStore:
             return {}
         return json.loads(self._store_path.read_text(encoding="utf-8"))
 
+    @staticmethod
+    def _serialize_response(response: Any) -> dict[str, Any]:
+        if hasattr(response, "to_dict"):
+            return {
+                "type": type(response).__name__,
+                "payload": response.to_dict(),
+            }
+        return {
+            "type": "raw",
+            "payload": response,
+        }
+
 
 class TextBackedIdempotencyStore:
     def __init__(
@@ -327,23 +458,18 @@ class TextBackedIdempotencyStore:
         self._read_text = read_text
         self._write_text = write_text
 
-    def get(self, operation: str, actor: str, key: str) -> tuple[str, ApiResponse] | None:
+    def get(self, operation: str, actor: str, key: str) -> tuple[str, Any] | None:
         entries = self._load()
         payload = entries.get(JsonFileIdempotencyStore._entry_key(operation, actor, key))
         if not payload:
             return None
-        return payload["request_hash"], ApiResponse(
-            ok=payload["response"]["ok"],
-            data=payload["response"]["data"],
-            error=ApiError(**payload["response"]["error"]) if payload["response"]["error"] else None,
-            correlation_id=payload["response"]["correlation_id"],
-        )
+        return payload["request_hash"], payload["response"]
 
-    def set(self, operation: str, actor: str, key: str, request_hash: str, response: ApiResponse):
+    def set(self, operation: str, actor: str, key: str, request_hash: str, response: Any):
         entries = self._load()
         entries[JsonFileIdempotencyStore._entry_key(operation, actor, key)] = {
             "request_hash": request_hash,
-            "response": response.to_dict(),
+            "response": JsonFileIdempotencyStore._serialize_response(response),
         }
         self._write_text(json.dumps(entries, indent=2, sort_keys=True))
 
@@ -399,172 +525,206 @@ class ValidationServiceApi:
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._id_fn = id_fn or (lambda: uuid4().hex)
 
+    @staticmethod
+    def _deserialize_cached_response(payload: Any) -> Any:
+        if not isinstance(payload, dict) or "type" not in payload or "payload" not in payload:
+            return payload
+        response_type = str(payload["type"])
+        data = payload["payload"]
+        if response_type == "ListSubmissionsResult":
+            return ListSubmissionsResult(
+                ok=bool(data["ok"]),
+                items=list(data.get("items", [])),
+                error=OperationError(**data["error"]) if data.get("error") else None,
+            )
+        if response_type in {"SubmissionMutationResult", "CreateSubmissionResult", "EditSubmissionResult", "RefreshSubmissionResult", "SetValidationFlagsResult"}:
+            return SubmissionMutationResult(
+                ok=bool(data["ok"]),
+                submission=data.get("submission"),
+                error=OperationError(**data["error"]) if data.get("error") else None,
+            )
+        if response_type == "ListSubmissionHistoryResult":
+            return ListSubmissionHistoryResult(
+                ok=bool(data["ok"]),
+                items=list(data.get("items", [])),
+                error=OperationError(**data["error"]) if data.get("error") else None,
+            )
+        if response_type == "ListEditHistoryResult":
+            return ListEditHistoryResult(
+                ok=bool(data["ok"]),
+                items=list(data.get("items", [])),
+                error=OperationError(**data["error"]) if data.get("error") else None,
+            )
+        return data
+
+    @staticmethod
+    def _list_submissions_result(
+        *,
+        items: list[dict[str, Any]] | None = None,
+        error: OperationError | None = None,
+    ) -> ListSubmissionsResult:
+        return ListSubmissionsResult(ok=error is None, items=items or [], error=error)
+
+    @staticmethod
+    def _submission_mutation_result(
+        *,
+        submission: dict[str, Any] | None = None,
+        error: OperationError | None = None,
+    ) -> SubmissionMutationResult:
+        return SubmissionMutationResult(ok=error is None, submission=submission, error=error)
+
+    @staticmethod
+    def _submission_history_result(
+        *,
+        items: list[dict[str, Any]] | None = None,
+        error: OperationError | None = None,
+    ) -> ListSubmissionHistoryResult:
+        return ListSubmissionHistoryResult(ok=error is None, items=items or [], error=error)
+
+    @staticmethod
+    def _edit_history_result(
+        *,
+        items: list[dict[str, Any]] | None = None,
+        error: OperationError | None = None,
+    ) -> ListEditHistoryResult:
+        return ListEditHistoryResult(ok=error is None, items=items or [], error=error)
+
     def list_submissions(
         self,
-        process_cd: str | None = None,
-        submission_period_cd: str | None = None,
-        state: str | None = None,
-        created_by: str | None = None,
-    ) -> ApiResponse:
+        request: ListSubmissionsRequest,
+    ) -> ListSubmissionsResult:
         items = self._project_submissions()
         filtered = []
         for item in items:
-            if process_cd and item["process_cd"] != process_cd:
+            if request.process_cd and item["process_cd"] != request.process_cd:
                 continue
-            if submission_period_cd and item["submission_period_cd"] != submission_period_cd:
+            if request.submission_period_cd and item["submission_period_cd"] != request.submission_period_cd:
                 continue
-            if state and item["state"] != state:
+            if request.state and item["state"] != request.state:
                 continue
-            if created_by and item["created_by"] != created_by:
+            if request.created_by and item["created_by"] != request.created_by:
                 continue
             filtered.append(item)
+        filtered.sort(key=lambda item: (str(item.get("created_ts_utc") or ""), str(item.get("submission_id") or "")), reverse=True)
         self._write_projection_file(items)
-        return self._ok(filtered)
-
-    def list_runs(
-        self,
-        submission_id: str | None = None,
-        state: str | None = None,
-        started_by: str | None = None,
-    ) -> ApiResponse:
-        items = self._project_runs()
-        filtered = []
-        for item in items:
-            if submission_id and item["submission_id"] != submission_id:
-                continue
-            if state and item["state"] != state:
-                continue
-            if started_by and item["started_by"] != started_by:
-                continue
-            filtered.append(item)
-        return self._ok(filtered)
+        return self._list_submissions_result(items=filtered)
 
     def list_submission_history(
         self,
-        submission_id: str,
-        actor: str | None = None,
-        include_run_events: bool = False,
-    ) -> ApiResponse:
-        projection = self._get_submission_projection(submission_id)
+        request: ListSubmissionHistoryRequest,
+    ) -> ListSubmissionHistoryResult:
+        projection = self._get_submission_projection(request.submission_id)
         if projection is None:
-            return self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
+            return self._submission_history_result(error=OperationError("SUBMISSION_NOT_FOUND", "Submission not found."))
 
         items = []
-        for event in sorted(self._events.list_all(), key=lambda item: (item.event_ts_utc, item.event_id)):
-            if event.submission_id != submission_id:
+        for event in sorted(self._events.list_all(), key=lambda item: (item.event_ts_utc, item.event_id), reverse=True):
+            if event.submission_id != request.submission_id:
                 continue
-            if actor and event.actor != actor:
+            if request.actor and event.actor != request.actor:
                 continue
-            if not include_run_events and event.event_type.startswith("validation_run_"):
+            if not request.include_run_events and event.event_type.startswith("validation_run_"):
                 continue
             items.append(self._submission_history_entry(event))
-        return self._ok(items)
+        return self._submission_history_result(items=items)
 
     def list_edit_history(
         self,
-        submission_id: str,
-        actor: str | None = None,
-    ) -> ApiResponse:
-        projection = self._get_submission_projection(submission_id)
+        request: ListEditHistoryRequest,
+    ) -> ListEditHistoryResult:
+        projection = self._get_submission_projection(request.submission_id)
         if projection is None:
-            return self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
+            return self._edit_history_result(error=OperationError("SUBMISSION_NOT_FOUND", "Submission not found."))
 
         items = []
-        for event in sorted(self._events.list_all(), key=lambda item: (item.event_ts_utc, item.event_id)):
-            if event.submission_id != submission_id:
+        for event in sorted(self._events.list_all(), key=lambda item: (item.event_ts_utc, item.event_id), reverse=True):
+            if event.submission_id != request.submission_id:
                 continue
-            if actor and event.actor != actor:
+            if request.actor and event.actor != request.actor:
                 continue
             if event.event_type not in SUBMISSION_EDIT_EVENT_TYPES:
                 continue
             items.append(self._submission_history_entry(event))
-        return self._ok(items)
+        return self._edit_history_result(items=items)
 
     def create_submission(
         self,
-        process_cd: str,
-        submission_period_cd: str,
-        organisations: dict[str, dict[str, Any] | OrganisationSubmissionRef | SharePointSourceRef],
-        templates: dict[str, dict[str, Any] | TemplateSubmissionRef] | None,
-        created_by: str,
-        idempotency_key: str,
-        note: str | None = None,
-        allow_duplicate_active: bool = False,
-    ) -> ApiResponse:
+        request: CreateSubmissionRequest,
+    ) -> SubmissionMutationResult:
         payload = {
-            "process_cd": process_cd,
-            "submission_period_cd": submission_period_cd,
+            "process_cd": request.process_cd,
+            "submission_period_cd": request.submission_period_cd,
             "organisations": {
                 key: (
                     value.to_dict()
                     if isinstance(value, (OrganisationSubmissionRef, SharePointSourceRef))
                     else value
                 )
-                for key, value in organisations.items()
+                for key, value in request.organisations.items()
             },
             "templates": {
                 key: value.to_dict() if isinstance(value, TemplateSubmissionRef) else value
-                for key, value in (templates or {}).items()
+                for key, value in (request.templates or {}).items()
             },
-            "note": note,
-            "allow_duplicate_active": allow_duplicate_active,
+            "note": request.note,
+            "allow_duplicate_active": request.allow_duplicate_active,
         }
-        idempotent = self._handle_idempotency("create_submission", created_by, idempotency_key, payload)
+        idempotent = self._handle_idempotency("create_submission", request.created_by, request.idempotency_key, payload)
         if idempotent is not None:
             return idempotent
 
-        process_cd = process_cd.strip()
-        submission_period_cd = submission_period_cd.strip()
+        process_cd = request.process_cd.strip()
+        submission_period_cd = request.submission_period_cd.strip()
         cleaned_organisations = {
             key.strip().upper(): self._normalize_organisation_ref(value)
-            for key, value in organisations.items()
+            for key, value in request.organisations.items()
         }
         cleaned_templates = {
             key.strip().upper(): self._normalize_template_ref(value)
-            for key, value in (templates or {}).items()
+            for key, value in (request.templates or {}).items()
         }
         if not process_cd or not submission_period_cd:
-            response = self._error("VALIDATION_ERROR", "process_cd and submission_period_cd are required.")
-            self._store_idempotency("create_submission", created_by, idempotency_key, payload, response)
+            response = self._submission_mutation_result(error=OperationError("VALIDATION_ERROR", "process_cd and submission_period_cd are required."))
+            self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, response)
             return response
         if not cleaned_organisations:
-            response = self._error("VALIDATION_ERROR", "organisations must not be empty.")
-            self._store_idempotency("create_submission", created_by, idempotency_key, payload, response)
+            response = self._submission_mutation_result(error=OperationError("VALIDATION_ERROR", "organisations must not be empty."))
+            self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, response)
             return response
         invalid_orgs = [key for key, item in cleaned_organisations.items() if not self._is_valid_organisation_ref(item)]
         if invalid_orgs:
-            response = self._error(
-                "VALIDATION_ERROR",
-                f"organisations contains invalid source refs for: {', '.join(invalid_orgs)}.",
+            response = self._submission_mutation_result(
+                error=OperationError("VALIDATION_ERROR", f"organisations contains invalid source refs for: {', '.join(invalid_orgs)}.")
             )
-            self._store_idempotency("create_submission", created_by, idempotency_key, payload, response)
+            self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, response)
             return response
         invalid_templates = [key for key, item in cleaned_templates.items() if not self._is_valid_template_ref(item)]
         if invalid_templates:
-            response = self._error(
-                "VALIDATION_ERROR",
-                f"templates contains invalid source refs for: {', '.join(invalid_templates)}.",
+            response = self._submission_mutation_result(
+                error=OperationError("VALIDATION_ERROR", f"templates contains invalid source refs for: {', '.join(invalid_templates)}.")
             )
-            self._store_idempotency("create_submission", created_by, idempotency_key, payload, response)
+            self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, response)
             return response
         template_validation_error = self._validate_template_links(cleaned_organisations, cleaned_templates)
         if template_validation_error is not None:
-            self._store_idempotency("create_submission", created_by, idempotency_key, payload, template_validation_error)
+            self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, template_validation_error)
             return template_validation_error
 
-        if not allow_duplicate_active:
+        if not request.allow_duplicate_active:
             for item in self._project_submissions():
                 if (
                     item["process_cd"] == process_cd
                     and item["submission_period_cd"] == submission_period_cd
                     and item["state"] not in TERMINAL_STATES
                 ):
-                    response = self._error(
-                        "DUPLICATE_ACTIVE_SUBMISSION",
-                        "Active submission already exists for process_cd/submission_period_cd.",
-                        details={"submission_id": item["submission_id"]},
+                    response = self._submission_mutation_result(
+                        error=OperationError(
+                            "DUPLICATE_ACTIVE_SUBMISSION",
+                            "Active submission already exists for process_cd/submission_period_cd.",
+                            details={"submission_id": item["submission_id"]},
+                        )
                     )
-                    self._store_idempotency("create_submission", created_by, idempotency_key, payload, response)
+                    self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, response)
                     return response
 
         submission_id = self._id_fn()
@@ -580,9 +740,9 @@ class ValidationServiceApi:
                 organisation_cd=org_cd,
                 sharepoint_source=org_ref.sharepoint_source.to_dict(),
                 validation_flag=VALIDATION_NOT_VALIDATED,
-                actor=created_by,
+                actor=request.created_by,
                 payload_json={
-                    **({"note": note.strip()} if note and note.strip() else {}),
+                    **({"note": request.note.strip()} if request.note and request.note.strip() else {}),
                     "template_keys": org_ref.template_keys,
                 }
                 or None,
@@ -600,7 +760,7 @@ class ValidationServiceApi:
                 organisation_cd=None,
                 sharepoint_source=template_ref.sharepoint_source.to_dict(),
                 validation_flag=VALIDATION_NOT_VALIDATED,
-                actor=created_by,
+                actor=request.created_by,
                 payload_json={
                     "template_key": template_key,
                     "assignment_mode": template_ref.assignment_mode,
@@ -611,38 +771,34 @@ class ValidationServiceApi:
 
         created = self._get_submission_projection(submission_id)
         self._write_projection_file(self._project_submissions())
-        response = self._ok(created)
-        self._store_idempotency("create_submission", created_by, idempotency_key, payload, response)
+        response = self._submission_mutation_result(submission=created)
+        self._store_idempotency("create_submission", request.created_by, request.idempotency_key, payload, response)
         return response
 
     def set_validation_flags(
         self,
-        submission_id: str,
-        organisation_changes: dict[str, str] | None,
-        template_changes: dict[str, str] | None,
-        modified_by: str,
-        idempotency_key: str,
-        reason: str | None = None,
-    ) -> ApiResponse:
+        request: SetValidationFlagsRequest,
+    ) -> SubmissionMutationResult:
         payload = {
-            "submission_id": submission_id,
-            "organisation_changes": organisation_changes or {},
-            "template_changes": template_changes or {},
-            "reason": reason,
+            "submission_id": request.submission_id,
+            "organisation_changes": request.organisation_changes or {},
+            "template_changes": request.template_changes or {},
+            "reason": request.reason,
+            "validation_run_id": request.validation_run_id,
         }
         idempotent = self._handle_idempotency(
-            "set_validation_flags", modified_by, idempotency_key, payload
+            "set_validation_flags", request.modified_by, request.idempotency_key, payload
         )
         if idempotent is not None:
             return idempotent
 
-        projection = self._get_submission_projection(submission_id)
+        projection = self._get_submission_projection(request.submission_id)
         if projection is None:
-            response = self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
+            response = self._submission_mutation_result(error=OperationError("SUBMISSION_NOT_FOUND", "Submission not found."))
             self._store_idempotency(
                 "set_validation_flags",
-                modified_by,
-                idempotency_key,
+                request.modified_by,
+                request.idempotency_key,
                 payload,
                 response,
             )
@@ -651,106 +807,110 @@ class ValidationServiceApi:
         known_orgs = set(projection["organisations"].keys())
         known_templates = set(projection.get("templates", {}).keys())
         now_iso = self._utc_now_iso()
-        for org, flag in (organisation_changes or {}).items():
+        for org, flag in (request.organisation_changes or {}).items():
             org_cd = org.strip().upper()
             if org_cd not in known_orgs:
-                response = self._error(
-                    "ORG_NOT_IN_SUBMISSION",
-                    f"Organisation '{org_cd}' does not exist in submission.",
+                response = self._submission_mutation_result(
+                    error=OperationError("ORG_NOT_IN_SUBMISSION", f"Organisation '{org_cd}' does not exist in submission.")
                 )
                 self._store_idempotency(
                     "set_validation_flags",
-                    modified_by,
-                    idempotency_key,
+                    request.modified_by,
+                    request.idempotency_key,
                     payload,
                     response,
                 )
                 return response
             if flag not in {VALIDATION_VALIDATED, VALIDATION_NOT_VALIDATED}:
-                response = self._error("VALIDATION_ERROR", f"Unsupported flag '{flag}' for '{org_cd}'.")
+                response = self._submission_mutation_result(
+                    error=OperationError("VALIDATION_ERROR", f"Unsupported flag '{flag}' for '{org_cd}'.")
+                )
                 self._store_idempotency(
                     "set_validation_flags",
-                    modified_by,
-                    idempotency_key,
+                    request.modified_by,
+                    request.idempotency_key,
                     payload,
                     response,
                 )
                 return response
 
-        for template_key, flag in (template_changes or {}).items():
+        for template_key, flag in (request.template_changes or {}).items():
             normalized_template_key = template_key.strip().upper()
             if normalized_template_key not in known_templates:
-                response = self._error(
-                    "TEMPLATE_NOT_IN_SUBMISSION",
-                    f"Template '{normalized_template_key}' does not exist in submission.",
+                response = self._submission_mutation_result(
+                    error=OperationError("TEMPLATE_NOT_IN_SUBMISSION", f"Template '{normalized_template_key}' does not exist in submission.")
                 )
                 self._store_idempotency(
                     "set_validation_flags",
-                    modified_by,
-                    idempotency_key,
+                    request.modified_by,
+                    request.idempotency_key,
                     payload,
                     response,
                 )
                 return response
             if flag not in {VALIDATION_VALIDATED, VALIDATION_NOT_VALIDATED}:
-                response = self._error("VALIDATION_ERROR", f"Unsupported flag '{flag}' for '{normalized_template_key}'.")
+                response = self._submission_mutation_result(
+                    error=OperationError("VALIDATION_ERROR", f"Unsupported flag '{flag}' for '{normalized_template_key}'.")
+                )
                 self._store_idempotency(
                     "set_validation_flags",
-                    modified_by,
-                    idempotency_key,
+                    request.modified_by,
+                    request.idempotency_key,
                     payload,
                     response,
                 )
                 return response
 
-        for org, flag in (organisation_changes or {}).items():
+        for org, flag in (request.organisation_changes or {}).items():
             org_cd = org.strip().upper()
             event = SubmissionEvent(
                 event_id=self._id_fn(),
                 event_ts_utc=now_iso,
                 event_type="org_flag_changed",
-                submission_id=submission_id,
+                submission_id=request.submission_id,
                 process_cd=projection["process_cd"],
                 submission_period_cd=projection["submission_period_cd"],
                 organisation_cd=org_cd,
                 sharepoint_source=self._with_validation_hashes(
                     projection["organisations"][org_cd]["file"],
                     flag,
+                    validation_run_id=request.validation_run_id,
                 ),
                 validation_flag=flag,
-                actor=modified_by,
-                reason=reason,
+                actor=request.modified_by,
+                reason=request.reason,
             )
             self._events.append(event)
 
-        for template_key, flag in (template_changes or {}).items():
+        for template_key, flag in (request.template_changes or {}).items():
             normalized_template_key = template_key.strip().upper()
             event = SubmissionEvent(
                 event_id=self._id_fn(),
                 event_ts_utc=now_iso,
                 event_type="template_flag_changed",
-                submission_id=submission_id,
+                submission_id=request.submission_id,
                 process_cd=projection["process_cd"],
                 submission_period_cd=projection["submission_period_cd"],
                 organisation_cd=None,
                 sharepoint_source=self._with_validation_hashes(
                     projection["templates"][normalized_template_key]["file"],
                     flag,
+                    validation_run_id=request.validation_run_id,
                 ),
                 validation_flag=flag,
-                actor=modified_by,
-                reason=reason,
+                actor=request.modified_by,
+                reason=request.reason,
                 payload_json={"template_key": normalized_template_key},
             )
             self._events.append(event)
 
-        updated = self._get_submission_projection(submission_id)
+        updated = self._get_submission_projection(request.submission_id)
         self._write_projection_file(self._project_submissions())
-        response = self._ok(updated)
+        response = self._submission_mutation_result(submission=updated)
         self._store_idempotency(
             "set_validation_flags",
-            modified_by,
-            idempotency_key,
+            request.modified_by,
+            request.idempotency_key,
             payload,
             response,
         )
@@ -763,14 +923,18 @@ class ValidationServiceApi:
         modified_by: str,
         idempotency_key: str,
         reason: str | None = None,
-    ) -> ApiResponse:
+        validation_run_id: str | None = None,
+    ) -> SubmissionMutationResult:
         return self.set_validation_flags(
-            submission_id=submission_id,
-            organisation_changes=changes,
-            template_changes=None,
-            modified_by=modified_by,
-            idempotency_key=idempotency_key,
-            reason=reason,
+            SetValidationFlagsRequest(
+                submission_id=submission_id,
+                organisation_changes=changes,
+                template_changes=None,
+                modified_by=modified_by,
+                idempotency_key=idempotency_key,
+                reason=reason,
+                validation_run_id=validation_run_id,
+            )
         )
 
     def set_template_validation_flags(
@@ -780,44 +944,48 @@ class ValidationServiceApi:
         modified_by: str,
         idempotency_key: str,
         reason: str | None = None,
-    ) -> ApiResponse:
+        validation_run_id: str | None = None,
+    ) -> SubmissionMutationResult:
         return self.set_validation_flags(
-            submission_id=submission_id,
-            organisation_changes=None,
-            template_changes=changes,
-            modified_by=modified_by,
-            idempotency_key=idempotency_key,
-            reason=reason,
+            SetValidationFlagsRequest(
+                submission_id=submission_id,
+                organisation_changes=None,
+                template_changes=changes,
+                modified_by=modified_by,
+                idempotency_key=idempotency_key,
+                reason=reason,
+                validation_run_id=validation_run_id,
+            )
         )
 
     def refresh_submission_hashes(
         self,
-        submission_id: str,
-        refreshed_by: str,
-        idempotency_key: str,
-    ) -> ApiResponse:
-        payload = {"submission_id": submission_id}
+        request: RefreshSubmissionRequest,
+    ) -> SubmissionMutationResult:
+        payload = {"submission_id": request.submission_id}
         idempotent = self._handle_idempotency(
             "refresh_submission_hashes",
-            refreshed_by,
-            idempotency_key,
+            request.refreshed_by,
+            request.idempotency_key,
             payload,
         )
         if idempotent is not None:
             return idempotent
 
         if self._sharepoint_hash_resolver is None:
-            response = self._error(
-                "SHAREPOINT_HASH_RESOLVER_NOT_CONFIGURED",
-                "SharePoint hash resolver is not configured for this service instance.",
+            response = self._submission_mutation_result(
+                error=OperationError(
+                    "SHAREPOINT_HASH_RESOLVER_NOT_CONFIGURED",
+                    "SharePoint hash resolver is not configured for this service instance.",
+                )
             )
-            self._store_idempotency("refresh_submission_hashes", refreshed_by, idempotency_key, payload, response)
+            self._store_idempotency("refresh_submission_hashes", request.refreshed_by, request.idempotency_key, payload, response)
             return response
 
-        projection = self._get_submission_projection(submission_id)
+        projection = self._get_submission_projection(request.submission_id)
         if projection is None:
-            response = self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
-            self._store_idempotency("refresh_submission_hashes", refreshed_by, idempotency_key, payload, response)
+            response = self._submission_mutation_result(error=OperationError("SUBMISSION_NOT_FOUND", "Submission not found."))
+            self._store_idempotency("refresh_submission_hashes", request.refreshed_by, request.idempotency_key, payload, response)
             return response
 
         now_iso = self._utc_now_iso()
@@ -827,13 +995,13 @@ class ValidationServiceApi:
                 event_id=self._id_fn(),
                 event_ts_utc=now_iso,
                 event_type="sharepoint_hashes_refreshed",
-                submission_id=submission_id,
+                submission_id=request.submission_id,
                 process_cd=projection["process_cd"],
                 submission_period_cd=projection["submission_period_cd"],
                 organisation_cd=org_cd,
                 sharepoint_source=refreshed_source,
-                validation_flag=org_payload.get("company_validation_flag"),
-                actor=refreshed_by,
+                validation_flag=org_payload.get("validation_flag"),
+                actor=request.refreshed_by,
                 payload_json={"template_keys": org_payload.get("template_keys", [])},
             )
             self._events.append(event)
@@ -844,110 +1012,100 @@ class ValidationServiceApi:
                 event_id=self._id_fn(),
                 event_ts_utc=now_iso,
                 event_type="template_hashes_refreshed",
-                submission_id=submission_id,
+                submission_id=request.submission_id,
                 process_cd=projection["process_cd"],
                 submission_period_cd=projection["submission_period_cd"],
                 organisation_cd=None,
                 sharepoint_source=refreshed_source,
                 validation_flag=template_payload.get("validation_flag"),
-                actor=refreshed_by,
+                actor=request.refreshed_by,
                 payload_json={"template_key": template_key},
             )
             self._events.append(event)
 
-        updated = self._get_submission_projection(submission_id)
+        updated = self._get_submission_projection(request.submission_id)
         self._write_projection_file(self._project_submissions())
-        response = self._ok(updated)
-        self._store_idempotency("refresh_submission_hashes", refreshed_by, idempotency_key, payload, response)
+        response = self._submission_mutation_result(submission=updated)
+        self._store_idempotency("refresh_submission_hashes", request.refreshed_by, request.idempotency_key, payload, response)
         return response
 
     def edit_submission(
         self,
-        submission_id: str,
-        modified_by: str,
-        idempotency_key: str,
-        organisation_upserts: dict[str, dict[str, Any] | OrganisationSubmissionRef | SharePointSourceRef] | None = None,
-        organisation_removals: list[str] | None = None,
-        template_upserts: dict[str, dict[str, Any] | TemplateSubmissionRef] | None = None,
-        template_removals: list[str] | None = None,
-        note: str | None = None,
-        reason: str | None = None,
-    ) -> ApiResponse:
+        request: EditSubmissionRequest,
+    ) -> SubmissionMutationResult:
         payload = {
-            "submission_id": submission_id,
+            "submission_id": request.submission_id,
             "organisation_upserts": {
                 key: (
                     value.to_dict()
                     if isinstance(value, (OrganisationSubmissionRef, SharePointSourceRef))
                     else value
                 )
-                for key, value in (organisation_upserts or {}).items()
+                for key, value in (request.organisation_upserts or {}).items()
             },
-            "organisation_removals": organisation_removals or [],
+            "organisation_removals": request.organisation_removals or [],
             "template_upserts": {
                 key: value.to_dict() if isinstance(value, TemplateSubmissionRef) else value
-                for key, value in (template_upserts or {}).items()
+                for key, value in (request.template_upserts or {}).items()
             },
-            "template_removals": template_removals or [],
-            "note": note,
-            "reason": reason,
+            "template_removals": request.template_removals or [],
+            "organisation_validation_changes": request.organisation_validation_changes or {},
+            "template_validation_changes": request.template_validation_changes or {},
+            "note": request.note,
+            "reason": request.reason,
         }
-        idempotent = self._handle_idempotency("edit_submission", modified_by, idempotency_key, payload)
+        idempotent = self._handle_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload)
         if idempotent is not None:
             return idempotent
 
-        projection = self._get_submission_projection(submission_id)
+        projection = self._get_submission_projection(request.submission_id)
         if projection is None:
-            response = self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
-            self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+            response = self._submission_mutation_result(error=OperationError("SUBMISSION_NOT_FOUND", "Submission not found."))
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
             return response
 
         current_orgs = projection["organisations"]
         current_templates = projection.get("templates", {})
-        removals = [item.strip().upper() for item in (organisation_removals or []) if item and item.strip()]
+        removals = [item.strip().upper() for item in (request.organisation_removals or []) if item and item.strip()]
         unknown_removals = [org_cd for org_cd in removals if org_cd not in current_orgs]
         if unknown_removals:
-            response = self._error(
-                "ORG_NOT_IN_SUBMISSION",
-                f"Organisation(s) not found in submission: {', '.join(unknown_removals)}.",
+            response = self._submission_mutation_result(
+                error=OperationError("ORG_NOT_IN_SUBMISSION", f"Organisation(s) not found in submission: {', '.join(unknown_removals)}.")
             )
-            self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
             return response
 
         normalized_upserts = {
-            key.strip().upper(): self._normalize_organisation_ref(value)
-            for key, value in (organisation_upserts or {}).items()
+            key.strip().upper(): self._reset_organisation_tracking_metadata(self._normalize_organisation_ref(value))
+            for key, value in (request.organisation_upserts or {}).items()
         }
         invalid_sources = [key for key, source in normalized_upserts.items() if not self._is_valid_organisation_ref(source)]
         if invalid_sources:
-            response = self._error(
-                "VALIDATION_ERROR",
-                f"organisation_upserts contains invalid refs for: {', '.join(invalid_sources)}.",
+            response = self._submission_mutation_result(
+                error=OperationError("VALIDATION_ERROR", f"organisation_upserts contains invalid refs for: {', '.join(invalid_sources)}.")
             )
-            self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
             return response
 
-        template_removal_keys = [item.strip().upper() for item in (template_removals or []) if item and item.strip()]
+        template_removal_keys = [item.strip().upper() for item in (request.template_removals or []) if item and item.strip()]
         unknown_template_removals = [key for key in template_removal_keys if key not in current_templates]
         if unknown_template_removals:
-            response = self._error(
-                "TEMPLATE_NOT_IN_SUBMISSION",
-                f"Template(s) not found in submission: {', '.join(unknown_template_removals)}.",
+            response = self._submission_mutation_result(
+                error=OperationError("TEMPLATE_NOT_IN_SUBMISSION", f"Template(s) not found in submission: {', '.join(unknown_template_removals)}.")
             )
-            self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
             return response
 
         normalized_template_upserts = {
-            key.strip().upper(): self._normalize_template_ref(value)
-            for key, value in (template_upserts or {}).items()
+            key.strip().upper(): self._reset_template_tracking_metadata(self._normalize_template_ref(value))
+            for key, value in (request.template_upserts or {}).items()
         }
         invalid_templates = [key for key, source in normalized_template_upserts.items() if not self._is_valid_template_ref(source)]
         if invalid_templates:
-            response = self._error(
-                "VALIDATION_ERROR",
-                f"template_upserts contains invalid refs for: {', '.join(invalid_templates)}.",
+            response = self._submission_mutation_result(
+                error=OperationError("VALIDATION_ERROR", f"template_upserts contains invalid refs for: {', '.join(invalid_templates)}.")
             )
-            self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
             return response
 
         template_validation_error = self._validate_template_links(
@@ -956,42 +1114,87 @@ class ValidationServiceApi:
             removed_template_keys=template_removal_keys,
         )
         if template_validation_error is not None:
-            self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, template_validation_error)
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, template_validation_error)
             return template_validation_error
 
         for org_cd in removals:
             if org_cd in normalized_upserts:
-                response = self._error(
-                    "VALIDATION_ERROR",
-                    f"Organisation '{org_cd}' cannot be removed and upserted in the same edit.",
+                response = self._submission_mutation_result(
+                    error=OperationError("VALIDATION_ERROR", f"Organisation '{org_cd}' cannot be removed and upserted in the same edit.")
                 )
-                self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+                self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
                 return response
         for template_key in template_removal_keys:
             if template_key in normalized_template_upserts:
-                response = self._error(
-                    "VALIDATION_ERROR",
-                    f"Template '{template_key}' cannot be removed and upserted in the same edit.",
+                response = self._submission_mutation_result(
+                    error=OperationError("VALIDATION_ERROR", f"Template '{template_key}' cannot be removed and upserted in the same edit.")
                 )
-                self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
+                self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
                 return response
 
+        normalized_org_validation_changes = {
+            key.strip().upper(): str(flag).strip().lower()
+            for key, flag in (request.organisation_validation_changes or {}).items()
+            if key and str(key).strip()
+        }
+        normalized_template_validation_changes = {
+            key.strip().upper(): str(flag).strip().lower()
+            for key, flag in (request.template_validation_changes or {}).items()
+            if key and str(key).strip()
+        }
+        effective_orgs = (set(current_orgs.keys()) - set(removals)) | set(normalized_upserts.keys())
+        effective_templates = (set(current_templates.keys()) - set(template_removal_keys)) | set(normalized_template_upserts.keys())
+        unknown_org_flag_changes = [org_cd for org_cd in normalized_org_validation_changes if org_cd not in effective_orgs]
+        if unknown_org_flag_changes:
+            response = self._submission_mutation_result(
+                error=OperationError("ORG_NOT_IN_SUBMISSION", f"Organisation(s) not found in submission: {', '.join(unknown_org_flag_changes)}.")
+            )
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
+            return response
+        unknown_template_flag_changes = [template_key for template_key in normalized_template_validation_changes if template_key not in effective_templates]
+        if unknown_template_flag_changes:
+            response = self._submission_mutation_result(
+                error=OperationError("TEMPLATE_NOT_IN_SUBMISSION", f"Template(s) not found in submission: {', '.join(unknown_template_flag_changes)}.")
+            )
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
+            return response
+        invalid_org_flags = [
+            org_cd for org_cd, flag in normalized_org_validation_changes.items()
+            if flag not in {VALIDATION_VALIDATED, VALIDATION_NOT_VALIDATED}
+        ]
+        if invalid_org_flags:
+            response = self._submission_mutation_result(
+                error=OperationError("VALIDATION_ERROR", f"Unsupported organisation validation flag update for: {', '.join(invalid_org_flags)}.")
+            )
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
+            return response
+        invalid_template_flags = [
+            template_key for template_key, flag in normalized_template_validation_changes.items()
+            if flag not in {VALIDATION_VALIDATED, VALIDATION_NOT_VALIDATED}
+        ]
+        if invalid_template_flags:
+            response = self._submission_mutation_result(
+                error=OperationError("VALIDATION_ERROR", f"Unsupported template validation flag update for: {', '.join(invalid_template_flags)}.")
+            )
+            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
+            return response
+
         now_iso = self._utc_now_iso()
-        if note is not None:
+        if request.note is not None:
             self._events.append(
                 SubmissionEvent(
                     event_id=self._id_fn(),
                     event_ts_utc=now_iso,
                     event_type="submission_note_updated",
-                    submission_id=submission_id,
+                    submission_id=request.submission_id,
                     process_cd=projection["process_cd"],
                     submission_period_cd=projection["submission_period_cd"],
                     organisation_cd=None,
                     sharepoint_source=None,
                     validation_flag=None,
-                    actor=modified_by,
-                    reason=reason,
-                    payload_json={"note": note.strip() if note.strip() else None},
+                    actor=request.modified_by,
+                    reason=request.reason,
+                    payload_json={"note": request.note.strip() if request.note.strip() else None},
                 )
             )
 
@@ -1001,14 +1204,14 @@ class ValidationServiceApi:
                     event_id=self._id_fn(),
                     event_ts_utc=now_iso,
                     event_type="submission_org_removed",
-                    submission_id=submission_id,
+                    submission_id=request.submission_id,
                     process_cd=projection["process_cd"],
                     submission_period_cd=projection["submission_period_cd"],
                     organisation_cd=org_cd,
                     sharepoint_source=None,
                     validation_flag=None,
-                    actor=modified_by,
-                    reason=reason,
+                    actor=request.modified_by,
+                    reason=request.reason,
                 )
             )
 
@@ -1018,14 +1221,14 @@ class ValidationServiceApi:
                     event_id=self._id_fn(),
                     event_ts_utc=now_iso,
                     event_type="submission_org_upserted",
-                    submission_id=submission_id,
+                    submission_id=request.submission_id,
                     process_cd=projection["process_cd"],
                     submission_period_cd=projection["submission_period_cd"],
                     organisation_cd=org_cd,
                     sharepoint_source=source.sharepoint_source.to_dict(),
                     validation_flag=VALIDATION_NOT_VALIDATED,
-                    actor=modified_by,
-                    reason=reason,
+                    actor=request.modified_by,
+                    reason=request.reason,
                     payload_json={"template_keys": source.template_keys},
                 )
             )
@@ -1036,14 +1239,14 @@ class ValidationServiceApi:
                     event_id=self._id_fn(),
                     event_ts_utc=now_iso,
                     event_type="submission_template_removed",
-                    submission_id=submission_id,
+                    submission_id=request.submission_id,
                     process_cd=projection["process_cd"],
                     submission_period_cd=projection["submission_period_cd"],
                     organisation_cd=None,
                     sharepoint_source=None,
                     validation_flag=None,
-                    actor=modified_by,
-                    reason=reason,
+                    actor=request.modified_by,
+                    reason=request.reason,
                     payload_json={"template_key": template_key},
                 )
             )
@@ -1054,14 +1257,14 @@ class ValidationServiceApi:
                     event_id=self._id_fn(),
                     event_ts_utc=now_iso,
                     event_type="submission_template_upserted",
-                    submission_id=submission_id,
+                    submission_id=request.submission_id,
                     process_cd=projection["process_cd"],
                     submission_period_cd=projection["submission_period_cd"],
                     organisation_cd=None,
                     sharepoint_source=template_ref.sharepoint_source.to_dict(),
                     validation_flag=VALIDATION_NOT_VALIDATED,
-                    actor=modified_by,
-                    reason=reason,
+                    actor=request.modified_by,
+                    reason=request.reason,
                     payload_json={
                         "template_key": template_key,
                         "assignment_mode": template_ref.assignment_mode,
@@ -1070,174 +1273,63 @@ class ValidationServiceApi:
                 )
             )
 
-        updated = self._get_submission_projection(submission_id)
-        self._write_projection_file(self._project_submissions())
-        response = self._ok(updated)
-        self._store_idempotency("edit_submission", modified_by, idempotency_key, payload, response)
-        return response
-
-    def start_validation_run(
-        self,
-        submission_id: str,
-        requested_org_files: dict[str, list[str] | None] | None,
-        started_by: str,
-        idempotency_key: str,
-        refresh_hashes: bool = True,
-    ) -> ApiResponse:
-        payload = {
-            "submission_id": submission_id,
-            "requested_org_files": requested_org_files,
-            "refresh_hashes": refresh_hashes,
+        org_sources_for_flags = {
+            org_cd: normalized_upserts[org_cd].sharepoint_source.to_dict()
+            if org_cd in normalized_upserts
+            else current_orgs[org_cd]["file"]
+            for org_cd in normalized_org_validation_changes
         }
-        idempotent = self._handle_idempotency("start_validation_run", started_by, idempotency_key, payload)
-        if idempotent is not None:
-            return idempotent
-
-        if self._run_file_stager is None:
-            response = self._error(
-                "RUN_FILE_STAGER_NOT_CONFIGURED",
-                "Run file stager is not configured for this service instance.",
-            )
-            self._store_idempotency("start_validation_run", started_by, idempotency_key, payload, response)
-            return response
-
-        projection = self._get_submission_projection(submission_id)
-        if projection is None:
-            response = self._error("SUBMISSION_NOT_FOUND", "Submission not found.")
-            self._store_idempotency("start_validation_run", started_by, idempotency_key, payload, response)
-            return response
-
-        if refresh_hashes:
-            projection = self._refresh_submission_projection(submission_id, started_by)
-
-        normalized_request = self._normalize_requested_org_files(
-            requested_org_files,
-            projection["organisations"],
-        )
-        if isinstance(normalized_request, ApiResponse):
-            self._store_idempotency("start_validation_run", started_by, idempotency_key, payload, normalized_request)
-            return normalized_request
-
-        run_id = self._id_fn()
-        now_iso = self._utc_now_iso()
-        self._events.append(
-            SubmissionEvent(
-                event_id=self._id_fn(),
-                event_ts_utc=now_iso,
-                event_type="validation_run_started",
-                submission_id=submission_id,
-                process_cd=projection["process_cd"],
-                submission_period_cd=projection["submission_period_cd"],
-                organisation_cd=None,
-                sharepoint_source=None,
-                validation_flag=None,
-                actor=started_by,
-                payload_json={
-                    "run_id": run_id,
-                    "requested_org_files": normalized_request,
-                },
-            )
-        )
-
-        for org_cd, requested_files in normalized_request.items():
-            source_payload = projection["organisations"][org_cd]["file"]
-            source = SharePointSourceRef.from_dict(source_payload)
-            tracked_by_path: dict[str, dict[str, Any]] = {
-                item.path: {**item.to_dict(), "asset_kind": "organisation", "asset_key": org_cd}
-                for item in source.tracked_files
-            }
-            for template_key in projection["organisations"][org_cd].get("template_keys", []):
-                template_payload = projection.get("templates", {}).get(template_key)
-                if not template_payload:
-                    continue
-                template_source = SharePointSourceRef.from_dict(template_payload["file"])
-                for item in template_source.tracked_files:
-                    tracked_by_path[f"TEMPLATE::{template_key}::{item.path}"] = {
-                        **item.to_dict(),
-                        "path": item.path,
-                        "asset_kind": "template",
-                        "asset_key": template_key,
-                        "source_payload": template_payload["file"],
-                    }
-            selected_paths = requested_files or list(tracked_by_path.keys())
-            missing_requested = [path for path in selected_paths if path not in tracked_by_path]
-            if missing_requested:
-                self._append_run_failure_event(
-                    submission_id=submission_id,
-                    projection=projection,
-                    run_id=run_id,
-                    org_cd=org_cd,
-                    actor=started_by,
-                    error_code="TRACKED_FILE_NOT_IN_SUBMISSION",
-                    message=f"Tracked files not found in submission source: {', '.join(missing_requested)}.",
-                    selected_files=[{"path": path} for path in selected_paths],
-                )
-                continue
-
-            selected_files = [tracked_by_path[path] for path in selected_paths]
-            unavailable_files = [item["path"] for item in selected_files if not item.get("current_hash")]
-            if unavailable_files:
-                self._append_run_failure_event(
-                    submission_id=submission_id,
-                    projection=projection,
-                    run_id=run_id,
-                    org_cd=org_cd,
-                    actor=started_by,
-                    error_code="TRACKED_FILE_MISSING",
-                    message=f"Tracked files are missing in SharePoint: {', '.join(unavailable_files)}.",
-                    selected_files=selected_files,
-                )
-                continue
-
-            staged_files: list[dict[str, Any]] = []
-            staging_error: dict[str, Any] | None = None
-            for tracked_file in selected_files:
-                try:
-                    source_for_file = tracked_file.get("source_payload") or source_payload
-                    staged_files.append(self._run_file_stager(source_for_file, tracked_file, run_id, org_cd))
-                except Exception as exc:
-                    staging_error = {
-                        "code": "FILE_STAGING_FAILED",
-                        "message": str(exc),
-                    }
-                    break
-
-            if staging_error:
-                self._append_run_failure_event(
-                    submission_id=submission_id,
-                    projection=projection,
-                    run_id=run_id,
-                    org_cd=org_cd,
-                    actor=started_by,
-                    error_code=staging_error["code"],
-                    message=staging_error["message"],
-                    selected_files=selected_files,
-                )
-                continue
-
+        for org_cd, flag in normalized_org_validation_changes.items():
             self._events.append(
                 SubmissionEvent(
                     event_id=self._id_fn(),
                     event_ts_utc=now_iso,
-                    event_type="validation_run_org_staged",
-                    submission_id=submission_id,
+                    event_type="org_flag_changed",
+                    submission_id=request.submission_id,
                     process_cd=projection["process_cd"],
                     submission_period_cd=projection["submission_period_cd"],
                     organisation_cd=org_cd,
-                    sharepoint_source=None,
-                    validation_flag=None,
-                    actor=started_by,
-                    payload_json={
-                        "run_id": run_id,
-                        "files": staged_files,
-                    },
+                    sharepoint_source=self._with_validation_hashes(
+                        org_sources_for_flags[org_cd],
+                        flag,
+                    ),
+                    validation_flag=flag,
+                    actor=request.modified_by,
+                    reason=request.reason,
                 )
             )
 
-        run_projection = self._get_run_projection(run_id)
+        template_sources_for_flags = {
+            template_key: normalized_template_upserts[template_key].sharepoint_source.to_dict()
+            if template_key in normalized_template_upserts
+            else current_templates[template_key]["file"]
+            for template_key in normalized_template_validation_changes
+        }
+        for template_key, flag in normalized_template_validation_changes.items():
+            self._events.append(
+                SubmissionEvent(
+                    event_id=self._id_fn(),
+                    event_ts_utc=now_iso,
+                    event_type="template_flag_changed",
+                    submission_id=request.submission_id,
+                    process_cd=projection["process_cd"],
+                    submission_period_cd=projection["submission_period_cd"],
+                    organisation_cd=None,
+                    sharepoint_source=self._with_validation_hashes(
+                        template_sources_for_flags[template_key],
+                        flag,
+                    ),
+                    validation_flag=flag,
+                    actor=request.modified_by,
+                    reason=request.reason,
+                    payload_json={"template_key": template_key},
+                )
+            )
+
+        updated = self._get_submission_projection(request.submission_id)
         self._write_projection_file(self._project_submissions())
-        response = self._ok(run_projection)
-        self._store_idempotency("start_validation_run", started_by, idempotency_key, payload, response)
+        response = self._submission_mutation_result(submission=updated)
+        self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
         return response
 
     def _project_submissions(self) -> list[dict[str, Any]]:
@@ -1301,71 +1393,18 @@ class ValidationServiceApi:
                 if event.sharepoint_source is not None:
                     org_entry["file"] = event.sharepoint_source
                 if event.validation_flag is not None:
-                    org_entry["company_validation_flag"] = event.validation_flag
+                    org_entry["validation_flag"] = event.validation_flag
                 if event.payload_json and "template_keys" in event.payload_json:
                     org_entry["template_keys"] = [
                         str(item).strip().upper()
                         for item in event.payload_json.get("template_keys", [])
                         if str(item).strip()
                     ]
-                org_entry["validation_flag"] = self._compute_organisation_state(
-                    org_entry,
-                    submission["templates"],
-                )
                 submission["organisations"][event.organisation_cd] = org_entry
-            else:
-                for org_entry in submission["organisations"].values():
-                    org_entry["validation_flag"] = self._compute_organisation_state(
-                        org_entry,
-                        submission["templates"],
-                    )
 
             submission["state"] = self._compute_submission_state(submission)
 
         return list(by_submission.values())
-
-    def _project_runs(self) -> list[dict[str, Any]]:
-        by_run: dict[str, dict[str, Any]] = {}
-        for event in sorted(self._events.list_all(), key=lambda e: (e.event_ts_utc, e.event_id)):
-            if not event.event_type.startswith("validation_run_"):
-                continue
-            payload = event.payload_json or {}
-            run_id = payload.get("run_id")
-            if not run_id:
-                continue
-            run = by_run.get(run_id)
-            if not run:
-                run = {
-                    "run_id": run_id,
-                    "submission_id": event.submission_id,
-                    "process_cd": event.process_cd,
-                    "submission_period_cd": event.submission_period_cd,
-                    "started_by": event.actor,
-                    "started_ts_utc": event.event_ts_utc,
-                    "requested_org_files": payload.get("requested_org_files", {}),
-                    "organisations": {},
-                    "state": "queued",
-                }
-                by_run[run_id] = run
-
-            if event.event_type == "validation_run_started":
-                continue
-
-            org_cd = event.organisation_cd
-            if not org_cd:
-                continue
-            org_entry = run["organisations"].get(org_cd, {})
-            if event.event_type == "validation_run_org_staged":
-                org_entry["status"] = "staged"
-                org_entry["files"] = payload.get("files", [])
-            elif event.event_type == "validation_run_org_failed":
-                org_entry["status"] = "failed"
-                org_entry["files"] = payload.get("files", [])
-                org_entry["error"] = payload.get("error")
-            run["organisations"][org_cd] = org_entry
-            run["state"] = self._compute_run_state(run)
-
-        return list(by_run.values())
 
     @staticmethod
     def _compute_submission_state(submission: dict[str, Any]) -> str:
@@ -1385,30 +1424,9 @@ class ValidationServiceApi:
             return "partially_validated"
         return "ready"
 
-    @staticmethod
-    def _compute_organisation_state(org_entry: dict[str, Any], templates: dict[str, Any]) -> str:
-        company_flag = org_entry.get("company_validation_flag", VALIDATION_NOT_VALIDATED)
-        template_flags = [
-            templates[key].get("validation_flag", VALIDATION_NOT_VALIDATED)
-            for key in org_entry.get("template_keys", [])
-            if key in templates
-        ]
-        flags = [company_flag, *template_flags]
-        if all(flag == VALIDATION_VALIDATED for flag in flags):
-            return VALIDATION_VALIDATED
-        if any(flag == VALIDATION_VALIDATED for flag in flags):
-            return "partially_validated"
-        return VALIDATION_NOT_VALIDATED
-
     def _get_submission_projection(self, submission_id: str) -> dict[str, Any] | None:
         for item in self._project_submissions():
             if item["submission_id"] == submission_id:
-                return item
-        return None
-
-    def _get_run_projection(self, run_id: str) -> dict[str, Any] | None:
-        for item in self._project_runs():
-            if item["run_id"] == run_id:
                 return item
         return None
 
@@ -1425,122 +1443,6 @@ class ValidationServiceApi:
         if self._projection_metadata_provider is not None:
             payload["storage_metadata"] = self._projection_metadata_provider()
         self._submissions_projection_store.write(payload)
-
-    def _refresh_submission_projection(self, submission_id: str, actor: str) -> dict[str, Any]:
-        projection = self._get_submission_projection(submission_id)
-        if projection is None:
-            raise ValueError("Submission not found.")
-        if self._sharepoint_hash_resolver is None:
-            return projection
-        now_iso = self._utc_now_iso()
-        for org_cd, org_payload in projection["organisations"].items():
-            refreshed_source = self._sharepoint_hash_resolver(org_payload["file"])
-            self._events.append(
-                SubmissionEvent(
-                    event_id=self._id_fn(),
-                    event_ts_utc=now_iso,
-                    event_type="sharepoint_hashes_refreshed",
-                    submission_id=submission_id,
-                    process_cd=projection["process_cd"],
-                    submission_period_cd=projection["submission_period_cd"],
-                    organisation_cd=org_cd,
-                    sharepoint_source=refreshed_source,
-                    validation_flag=org_payload.get("company_validation_flag"),
-                    actor=actor,
-                    payload_json={"template_keys": org_payload.get("template_keys", [])},
-                )
-            )
-        for template_key, template_payload in projection.get("templates", {}).items():
-            refreshed_source = self._sharepoint_hash_resolver(template_payload["file"])
-            self._events.append(
-                SubmissionEvent(
-                    event_id=self._id_fn(),
-                    event_ts_utc=now_iso,
-                    event_type="template_hashes_refreshed",
-                    submission_id=submission_id,
-                    process_cd=projection["process_cd"],
-                    submission_period_cd=projection["submission_period_cd"],
-                    organisation_cd=None,
-                    sharepoint_source=refreshed_source,
-                    validation_flag=template_payload.get("validation_flag"),
-                    actor=actor,
-                    payload_json={"template_key": template_key},
-                )
-            )
-        return self._get_submission_projection(submission_id) or projection
-
-    def _append_run_failure_event(
-        self,
-        submission_id: str,
-        projection: dict[str, Any],
-        run_id: str,
-        org_cd: str,
-        actor: str,
-        error_code: str,
-        message: str,
-        selected_files: list[dict[str, Any]],
-    ):
-        self._events.append(
-            SubmissionEvent(
-                event_id=self._id_fn(),
-                event_ts_utc=self._utc_now_iso(),
-                event_type="validation_run_org_failed",
-                submission_id=submission_id,
-                process_cd=projection["process_cd"],
-                submission_period_cd=projection["submission_period_cd"],
-                organisation_cd=org_cd,
-                sharepoint_source=None,
-                validation_flag=None,
-                actor=actor,
-                payload_json={
-                    "run_id": run_id,
-                    "files": selected_files,
-                    "error": {
-                        "code": error_code,
-                        "message": message,
-                    },
-                },
-            )
-        )
-
-    @staticmethod
-    def _normalize_requested_org_files(
-        requested_org_files: dict[str, list[str] | None] | None,
-        organisations: dict[str, Any],
-    ) -> dict[str, list[str] | None] | ApiResponse:
-        if requested_org_files is None:
-            return {org_cd: None for org_cd in organisations}
-
-        normalized: dict[str, list[str] | None] = {}
-        known_orgs = set(organisations.keys())
-        for raw_org, raw_files in requested_org_files.items():
-            org_cd = raw_org.strip().upper()
-            if org_cd not in known_orgs:
-                return ApiResponse(
-                    ok=False,
-                    data=None,
-                    error=ApiError(
-                        code="ORG_NOT_IN_SUBMISSION",
-                        message=f"Organisation '{org_cd}' does not exist in submission.",
-                    ),
-                    correlation_id=uuid4().hex,
-                )
-            if raw_files is None:
-                normalized[org_cd] = None
-            else:
-                normalized[org_cd] = [str(item).strip() for item in raw_files if str(item).strip()]
-        return normalized
-
-    @staticmethod
-    def _compute_run_state(run: dict[str, Any]) -> str:
-        statuses = [org.get("status") for org in run["organisations"].values() if org.get("status")]
-        if not statuses:
-            return "queued"
-        if all(status == "staged" for status in statuses):
-            return "staged"
-        if any(status == "staged" for status in statuses):
-            return "partially_failed"
-        return "failed"
 
     @staticmethod
     def _normalize_source_ref(source: dict[str, Any] | SharePointSourceRef) -> SharePointSourceRef:
@@ -1559,6 +1461,7 @@ class ValidationServiceApi:
                     watch_search_term=item.watch_search_term.strip() if item.watch_search_term else None,
                     current_hash=item.current_hash.strip() if item.current_hash else None,
                     validated_hash=item.validated_hash.strip() if item.validated_hash else None,
+                    validation_run_id=item.validation_run_id.strip() if item.validation_run_id else None,
                     size_bytes=item.size_bytes,
                     created=item.created.strip() if item.created else None,
                     modified=item.modified.strip() if item.modified else None,
@@ -1623,6 +1526,49 @@ class ValidationServiceApi:
         )
 
     @staticmethod
+    def _reset_source_tracking_metadata(source: SharePointSourceRef) -> SharePointSourceRef:
+        return SharePointSourceRef(
+            source_type=source.source_type,
+            target_name=source.target_name,
+            root_path=source.root_path,
+            tracked_files=[
+                TrackedFileRef(
+                    path=item.path,
+                    watch=item.watch,
+                    watch_search_term=item.watch_search_term,
+                    current_hash=None,
+                    validated_hash=None,
+                    validation_run_id=None,
+                    size_bytes=None,
+                    created=None,
+                    modified=None,
+                    modified_by=None,
+                )
+                for item in source.tracked_files
+            ],
+            folder_url=source.folder_url,
+            drive_id=source.drive_id,
+            linked_item_id=source.linked_item_id,
+            linked_item_name=source.linked_item_name,
+            linked_item_is_folder=source.linked_item_is_folder,
+        )
+
+    @classmethod
+    def _reset_organisation_tracking_metadata(cls, source: OrganisationSubmissionRef) -> OrganisationSubmissionRef:
+        return OrganisationSubmissionRef(
+            sharepoint_source=cls._reset_source_tracking_metadata(source.sharepoint_source),
+            template_keys=list(source.template_keys),
+        )
+
+    @classmethod
+    def _reset_template_tracking_metadata(cls, template: TemplateSubmissionRef) -> TemplateSubmissionRef:
+        return TemplateSubmissionRef(
+            assignment_mode=template.assignment_mode,
+            applies_to=list(template.applies_to),
+            sharepoint_source=cls._reset_source_tracking_metadata(template.sharepoint_source),
+        )
+
+    @staticmethod
     def _template_ref_from_projection(payload: dict[str, Any]) -> TemplateSubmissionRef:
         return TemplateSubmissionRef(
             assignment_mode=str(payload.get("assignment_mode") or "shared").strip().lower(),
@@ -1642,28 +1588,37 @@ class ValidationServiceApi:
         organisations: dict[str, OrganisationSubmissionRef],
         templates: dict[str, TemplateSubmissionRef],
         removed_template_keys: list[str] | None = None,
-    ) -> ApiResponse | None:
+    ) -> SubmissionMutationResult | None:
         removed = set(removed_template_keys or [])
         available_templates = set(templates.keys()) - removed
         known_orgs = set(organisations.keys())
         for org_cd, org_ref in organisations.items():
             unknown_template_keys = [key for key in org_ref.template_keys if key not in available_templates]
             if unknown_template_keys:
-                return self._error(
-                    "VALIDATION_ERROR",
-                    f"Organisation '{org_cd}' references unknown template(s): {', '.join(unknown_template_keys)}.",
+                return self._submission_mutation_result(
+                    error=OperationError(
+                        "VALIDATION_ERROR",
+                        f"Organisation '{org_cd}' references unknown template(s): {', '.join(unknown_template_keys)}.",
+                    )
                 )
         for template_key, template_ref in templates.items():
             unknown_orgs = [org_cd for org_cd in template_ref.applies_to if org_cd not in known_orgs]
             if unknown_orgs:
-                return self._error(
-                    "VALIDATION_ERROR",
-                    f"Template '{template_key}' references unknown organisation(s): {', '.join(unknown_orgs)}.",
+                return self._submission_mutation_result(
+                    error=OperationError(
+                        "VALIDATION_ERROR",
+                        f"Template '{template_key}' references unknown organisation(s): {', '.join(unknown_orgs)}.",
+                    )
                 )
         return None
 
     @staticmethod
-    def _with_validation_hashes(source_payload: dict[str, Any], validation_flag: str) -> dict[str, Any]:
+    def _with_validation_hashes(
+        source_payload: dict[str, Any],
+        validation_flag: str,
+        *,
+        validation_run_id: str | None = None,
+    ) -> dict[str, Any]:
         source = SharePointSourceRef.from_dict(source_payload)
         tracked_files = [
             TrackedFileRef(
@@ -1672,6 +1627,7 @@ class ValidationServiceApi:
                 watch_search_term=item.watch_search_term,
                 current_hash=item.current_hash,
                 validated_hash=item.current_hash if validation_flag == VALIDATION_VALIDATED else None,
+                validation_run_id=validation_run_id if validation_flag == VALIDATION_VALIDATED else None,
                 size_bytes=item.size_bytes,
                 created=item.created,
                 modified=item.modified,
@@ -1698,18 +1654,17 @@ class ValidationServiceApi:
         actor: str,
         idempotency_key: str,
         payload: dict[str, Any],
-    ) -> ApiResponse | None:
+    ) -> Any | None:
         payload_hash = self._hash_payload(payload)
         entry = self._idempotency.get(operation, actor, idempotency_key)
         if not entry:
             return None
         cached_hash, cached_response = entry
         if cached_hash != payload_hash:
-            return self._error(
-                "IDEMPOTENCY_CONFLICT",
-                "Idempotency key was already used with a different payload.",
+            return self._submission_mutation_result(
+                error=OperationError("IDEMPOTENCY_CONFLICT", "Idempotency key was already used with a different payload.")
             )
-        return cached_response
+        return self._deserialize_cached_response(cached_response)
 
     def _store_idempotency(
         self,
@@ -1717,20 +1672,9 @@ class ValidationServiceApi:
         actor: str,
         idempotency_key: str,
         payload: dict[str, Any],
-        response: ApiResponse,
+        response: Any,
     ):
         self._idempotency.set(operation, actor, idempotency_key, self._hash_payload(payload), response)
-
-    def _ok(self, data: dict[str, Any] | list[dict[str, Any]]) -> ApiResponse:
-        return ApiResponse(ok=True, data=data, error=None, correlation_id=self._id_fn())
-
-    def _error(self, code: str, message: str, details: dict[str, Any] | None = None) -> ApiResponse:
-        return ApiResponse(
-            ok=False,
-            data=None,
-            error=ApiError(code=code, message=message, details=details),
-            correlation_id=self._id_fn(),
-        )
 
     @staticmethod
     def _submission_history_entry(event: SubmissionEvent) -> dict[str, Any]:

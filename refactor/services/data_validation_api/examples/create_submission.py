@@ -7,16 +7,18 @@ from uuid import uuid4
 from typing import Any
 
 from common import (
-    build_submission_refs,
     build_submission_service,
     ensure_authenticated,
-    find_prefix_matches,
     load_config,
     prompt_bool,
     prompt_service_config,
     prompt_text,
-    resolve_sharepoint_folder_listing,
     resolve_actor,
+)
+from refactor.services.data_validation_api.workflows import (
+    create_submission_from_discovery,
+    find_prefix_matches,
+    resolve_sharepoint_folder_listing,
 )
 
 
@@ -503,18 +505,17 @@ def main():
         "note": note or None,
         "allow_duplicate_active": allow_duplicate_active,
     }
-    organisations, templates = build_submission_refs(filtered_submission)
-
-    response = service.create_submission(
+    response = create_submission_from_discovery(
+        service,
         process_cd=process_cd,
         submission_period_cd=submission_period_cd,
-        organisations=organisations,
-        templates=templates,
+        organisations_payload=filtered_submission.get("organisations", {}),
+        templates_payload=filtered_submission.get("templates", {}),
         created_by=created_by,
         idempotency_key=f"create-submission-example-{uuid4().hex}",
         note=note or None,
         allow_duplicate_active=allow_duplicate_active,
-    )
+    ).response
 
     print(json.dumps(response.to_dict(), indent=2))
 
