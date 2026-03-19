@@ -288,6 +288,63 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertEqual(edited.data["note"], "Updated note")
         self.assertIsNone(edited.data["organisations"]["ORG1"]["file"]["tracked_files"][0]["validation_run_id"])
 
+    def test_edit_submission_can_clear_note_with_none(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+                note="First note",
+            )
+        )
+        assert created.data is not None
+
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                note=None,
+                reason="Clear submission note",
+            )
+        )
+
+        self.assertTrue(edited.ok)
+        assert edited.data is not None
+        self.assertIsNone(edited.data["note"])
+
+    def test_edit_submission_without_note_keeps_existing_note(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx")},
+                templates={},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+                note="First note",
+            )
+        )
+        assert created.data is not None
+
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=created.data["submission_id"],
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                reason="No note change",
+            )
+        )
+
+        self.assertTrue(edited.ok)
+        assert edited.data is not None
+        self.assertEqual(edited.data["note"], "First note")
+
     def test_edit_submission_can_update_validation_flags(self):
         service = self._service()
         created = self._create_submission(service,

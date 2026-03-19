@@ -14,6 +14,7 @@ from refactor.services.data_validation_api.submission_service import (
     SharePointSourceRef,
     TemplateSubmissionRef,
     TrackedFileRef,
+    UNSET_NOTE,
     ValidationServiceApi,
 )
 from refactor.services.data_validation_api.validation_run_api import (
@@ -635,7 +636,7 @@ def edit_submission_workflow(
     template_removals: list[str] | None = None,
     organisation_validation_changes: dict[str, str] | None = None,
     template_validation_changes: dict[str, str] | None = None,
-    note: str | None = None,
+    note: str | None | object = UNSET_NOTE,
     reason: str | None = None,
     idempotency_key: str | None = None,
 ) -> SubmissionWorkflowResult:

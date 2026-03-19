@@ -11,6 +11,13 @@ from uuid import uuid4
 
 VALIDATION_VALIDATED = "validated"
 VALIDATION_NOT_VALIDATED = "not_validated"
+
+
+class _UnsetNoteValue:
+    pass
+
+
+UNSET_NOTE = _UnsetNoteValue()
 TERMINAL_STATES = {"validated", "failed"}
 SUBMISSION_EDIT_EVENT_TYPES = {
     "submission_created",
@@ -67,7 +74,7 @@ class EditSubmissionRequest:
     template_removals: list[str] | None = None
     organisation_validation_changes: dict[str, str] | None = None
     template_validation_changes: dict[str, str] | None = None
-    note: str | None = None
+    note: str | None | _UnsetNoteValue = UNSET_NOTE
     reason: str | None = None
 
 
@@ -1051,7 +1058,7 @@ class ValidationServiceApi:
             "template_removals": request.template_removals or [],
             "organisation_validation_changes": request.organisation_validation_changes or {},
             "template_validation_changes": request.template_validation_changes or {},
-            "note": request.note,
+            "note": None if request.note is UNSET_NOTE else request.note,
             "reason": request.reason,
         }
         idempotent = self._handle_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload)
@@ -1180,7 +1187,8 @@ class ValidationServiceApi:
             return response
 
         now_iso = self._utc_now_iso()
-        if request.note is not None:
+        if request.note is not UNSET_NOTE:
+            normalized_note = request.note.strip() if isinstance(request.note, str) else None
             self._events.append(
                 SubmissionEvent(
                     event_id=self._id_fn(),
@@ -1194,7 +1202,7 @@ class ValidationServiceApi:
                     validation_flag=None,
                     actor=request.modified_by,
                     reason=request.reason,
-                    payload_json={"note": request.note.strip() if request.note.strip() else None},
+                    payload_json={"note": normalized_note if normalized_note else None},
                 )
             )
 
