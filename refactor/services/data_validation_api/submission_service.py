@@ -24,6 +24,8 @@ SUBMISSION_EDIT_EVENT_TYPES = {
     "submission_template_upserted",
     "org_flag_changed",
     "template_flag_changed",
+    "org_validation_hash_updated",
+    "template_validation_hash_updated",
     "sharepoint_hashes_refreshed",
     "template_hashes_refreshed",
     "submission_note_updated",
@@ -90,6 +92,17 @@ class SetValidationFlagsRequest:
     submission_id: str
     organisation_changes: dict[str, str] | None
     template_changes: dict[str, str] | None
+    modified_by: str
+    idempotency_key: str
+    reason: str | None = None
+    validation_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PersistValidationHashesRequest:
+    submission_id: str
+    organisation_codes: list[str] | None
+    template_keys: list[str] | None
     modified_by: str
     idempotency_key: str
     reason: str | None = None
@@ -944,6 +957,120 @@ class ValidationServiceApi:
             )
         )
 
+    def persist_validation_hashes(
+        self,
+        request: PersistValidationHashesRequest,
+    ) -> SubmissionMutationResult:
+        payload = {
+            "submission_id": request.submission_id,
+            "organisation_codes": request.organisation_codes or [],
+            "template_keys": request.template_keys or [],
+            "reason": request.reason,
+            "validation_run_id": request.validation_run_id,
+        }
+        idempotent = self._handle_idempotency(
+            "persist_validation_hashes", request.modified_by, request.idempotency_key, payload
+        )
+        if idempotent is not None:
+            return idempotent
+
+        projection = self._get_submission_projection(request.submission_id)
+        if projection is None:
+            response = self._submission_mutation_result(error=OperationError("SUBMISSION_NOT_FOUND", "Submission not found."))
+            self._store_idempotency(
+                "persist_validation_hashes",
+                request.modified_by,
+                request.idempotency_key,
+                payload,
+                response,
+            )
+            return response
+
+        organisation_codes = [item.strip().upper() for item in (request.organisation_codes or []) if item and item.strip()]
+        template_keys = [item.strip().upper() for item in (request.template_keys or []) if item and item.strip()]
+        known_orgs = set(projection["organisations"].keys())
+        known_templates = set(projection.get("templates", {}).keys())
+        unknown_orgs = [org_cd for org_cd in organisation_codes if org_cd not in known_orgs]
+        if unknown_orgs:
+            response = self._submission_mutation_result(
+                error=OperationError("ORG_NOT_IN_SUBMISSION", f"Organisation(s) not found in submission: {', '.join(unknown_orgs)}.")
+            )
+            self._store_idempotency(
+                "persist_validation_hashes",
+                request.modified_by,
+                request.idempotency_key,
+                payload,
+                response,
+            )
+            return response
+        unknown_templates = [template_key for template_key in template_keys if template_key not in known_templates]
+        if unknown_templates:
+            response = self._submission_mutation_result(
+                error=OperationError("TEMPLATE_NOT_IN_SUBMISSION", f"Template(s) not found in submission: {', '.join(unknown_templates)}.")
+            )
+            self._store_idempotency(
+                "persist_validation_hashes",
+                request.modified_by,
+                request.idempotency_key,
+                payload,
+                response,
+            )
+            return response
+
+        now_iso = self._utc_now_iso()
+        for org_cd in organisation_codes:
+            self._events.append(
+                SubmissionEvent(
+                    event_id=self._id_fn(),
+                    event_ts_utc=now_iso,
+                    event_type="org_validation_hash_updated",
+                    submission_id=request.submission_id,
+                    process_cd=projection["process_cd"],
+                    submission_period_cd=projection["submission_period_cd"],
+                    organisation_cd=org_cd,
+                    sharepoint_source=self._with_persisted_validation_hashes(
+                        projection["organisations"][org_cd]["file"],
+                        validation_run_id=request.validation_run_id,
+                    ),
+                    validation_flag=None,
+                    actor=request.modified_by,
+                    reason=request.reason,
+                )
+            )
+
+        for template_key in template_keys:
+            self._events.append(
+                SubmissionEvent(
+                    event_id=self._id_fn(),
+                    event_ts_utc=now_iso,
+                    event_type="template_validation_hash_updated",
+                    submission_id=request.submission_id,
+                    process_cd=projection["process_cd"],
+                    submission_period_cd=projection["submission_period_cd"],
+                    organisation_cd=None,
+                    sharepoint_source=self._with_persisted_validation_hashes(
+                        projection["templates"][template_key]["file"],
+                        validation_run_id=request.validation_run_id,
+                    ),
+                    validation_flag=None,
+                    actor=request.modified_by,
+                    reason=request.reason,
+                    payload_json={"template_key": template_key},
+                )
+            )
+
+        updated = self._get_submission_projection(request.submission_id)
+        self._write_projection_file(self._project_submissions())
+        response = self._submission_mutation_result(submission=updated)
+        self._store_idempotency(
+            "persist_validation_hashes",
+            request.modified_by,
+            request.idempotency_key,
+            payload,
+            response,
+        )
+        return response
+
     def set_template_validation_flags(
         self,
         submission_id: str,
@@ -1115,14 +1242,15 @@ class ValidationServiceApi:
             self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, response)
             return response
 
-        template_validation_error = self._validate_template_links(
-            {**{k: self._organisation_ref_from_projection(v) for k, v in current_orgs.items()}, **normalized_upserts},
-            {**{k: self._template_ref_from_projection(v) for k, v in current_templates.items()}, **normalized_template_upserts},
-            removed_template_keys=template_removal_keys,
-        )
-        if template_validation_error is not None:
-            self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, template_validation_error)
-            return template_validation_error
+        if normalized_upserts or removals or normalized_template_upserts or template_removal_keys:
+            template_validation_error = self._validate_template_links(
+                {**{k: self._organisation_ref_from_projection(v) for k, v in current_orgs.items()}, **normalized_upserts},
+                {**{k: self._template_ref_from_projection(v) for k, v in current_templates.items()}, **normalized_template_upserts},
+                removed_template_keys=template_removal_keys,
+            )
+            if template_validation_error is not None:
+                self._store_idempotency("edit_submission", request.modified_by, request.idempotency_key, payload, template_validation_error)
+                return template_validation_error
 
         for org_cd in removals:
             if org_cd in normalized_upserts:
@@ -1369,7 +1497,12 @@ class ValidationServiceApi:
             if event.payload_json and "note" in event.payload_json:
                 submission["note"] = event.payload_json.get("note")
 
-            if event.event_type in {"submission_template_upserted", "template_flag_changed", "template_hashes_refreshed"}:
+            if event.event_type in {
+                "submission_template_upserted",
+                "template_flag_changed",
+                "template_hashes_refreshed",
+                "template_validation_hash_updated",
+            }:
                 template_key = str((event.payload_json or {}).get("template_key", "")).strip().upper()
                 if template_key:
                     template_entry = submission["templates"].get(template_key, {})
@@ -1652,6 +1785,36 @@ class ValidationServiceApi:
         ).to_dict()
 
     @staticmethod
+    def _with_persisted_validation_hashes(
+        source_payload: dict[str, Any],
+        *,
+        validation_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        source = SharePointSourceRef.from_dict(source_payload)
+        tracked_files = [
+            TrackedFileRef(
+                path=item.path,
+                watch=item.watch,
+                watch_search_term=item.watch_search_term,
+                current_hash=item.current_hash,
+                validated_hash=item.current_hash if item.current_hash else None,
+                validation_run_id=validation_run_id if item.current_hash else None,
+                size_bytes=item.size_bytes,
+                created=item.created,
+                modified=item.modified,
+                modified_by=item.modified_by,
+            )
+            for item in source.tracked_files
+        ]
+        return SharePointSourceRef(
+            source_type=source.source_type,
+            target_name=source.target_name,
+            root_path=source.root_path,
+            tracked_files=tracked_files,
+            folder_url=source.folder_url,
+        ).to_dict()
+
+    @staticmethod
     def _hash_payload(payload: dict[str, Any]) -> str:
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -1724,6 +1887,11 @@ class ValidationServiceApi:
         if event.event_type == "template_flag_changed":
             template_key = str(payload.get("template_key", "")).strip().upper()
             return f"Template '{template_key}' validation flag set to '{event.validation_flag}'."
+        if event.event_type == "org_validation_hash_updated":
+            return f"Organisation '{event.organisation_cd}' validation hash updated from run results."
+        if event.event_type == "template_validation_hash_updated":
+            template_key = str(payload.get("template_key", "")).strip().upper()
+            return f"Template '{template_key}' validation hash updated from run results."
         if event.event_type == "sharepoint_hashes_refreshed":
             return f"Organisation '{event.organisation_cd}' SharePoint hashes refreshed."
         if event.event_type == "template_hashes_refreshed":

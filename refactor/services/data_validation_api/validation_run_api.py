@@ -14,6 +14,7 @@ from refactor.services.data_validation_api.submission_service import (
     JsonFileIdempotencyStore,
     JsonProjectionStore,
     OperationError,
+    PersistValidationHashesRequest,
     SetValidationFlagsRequest,
     TextBackedIdempotencyStore,
     TextBackedProjectionStore,
@@ -637,6 +638,7 @@ class ValidationRunApi:
         runs_projection_path: str | Path | None = None,
         runs_projection_store: JsonProjectionStore | TextBackedProjectionStore | None = None,
         submission_flag_setter: Callable[[str, dict[str, str] | None, dict[str, str] | None, str, str, str | None], Any] | None = None,
+        submission_hash_persister: Callable[[PersistValidationHashesRequest], Any] | None = None,
         asset_stager: Callable[[AssetSnapshot, str], StagedAsset | dict[str, Any]] | None = None,
         pipeline_trigger: Callable[[dict[str, Any]], PipelineRef | dict[str, Any]] | None = None,
         pipeline_status_resolver: Callable[[PipelineRef, dict[str, Any]], dict[str, Any] | str] | None = None,
@@ -651,6 +653,7 @@ class ValidationRunApi:
         if not self._runs_projection_store and runs_projection_path:
             self._runs_projection_store = JsonProjectionStore(runs_projection_path)
         self._submission_flag_setter = submission_flag_setter
+        self._submission_hash_persister = submission_hash_persister
         self._asset_stager = asset_stager
         self._pipeline_trigger = pipeline_trigger
         self._pipeline_status_resolver = pipeline_status_resolver
@@ -1174,6 +1177,36 @@ class ValidationRunApi:
                     "submission_id": str(submission_data["submission_id"]),
                     "state": str(submission_data["state"]),
                 }
+        elif self._submission_hash_persister is not None and passed_asset_keys:
+            organisation_codes, template_keys = self._build_submission_hash_updates(
+                projection,
+                passed_asset_keys=passed_asset_keys,
+            )
+            response = self._submission_hash_persister(
+                PersistValidationHashesRequest(
+                    submission_id=projection["run"]["submission_id"],
+                    organisation_codes=organisation_codes or None,
+                    template_keys=template_keys or None,
+                    modified_by=request.finalized_by,
+                    idempotency_key=f"persist-validation-hashes-{request.run_id}-{self._hash_payload(result_summary)}",
+                    reason=f"Persist validation hashes for run {request.run_id}",
+                    validation_run_id=request.run_id,
+                )
+            )
+            if hasattr(response, "ok") and not getattr(response, "ok"):
+                error = getattr(response, "error", None)
+                return FinalizeRunResult(
+                    run_id=request.run_id,
+                    state="failed",
+                    result_summary=result_summary,
+                    submission_update=None,
+                    ok=False,
+                    error=self._operation_error(
+                        "RUN_FINALIZATION_FAILED",
+                        getattr(error, "message", "Failed to persist validation hashes."),
+                        {"run_id": request.run_id},
+                    ),
+                )
 
         self._write_projection_file()
         updated = self._require_run_projection(request.run_id)
@@ -1207,6 +1240,22 @@ class ValidationRunApi:
                 "auto_finalized": True,
             },
         )
+        if self._submission_hash_persister is not None and passed_asset_keys:
+            organisation_codes, template_keys = self._build_submission_hash_updates(
+                projection,
+                passed_asset_keys=passed_asset_keys,
+            )
+            self._submission_hash_persister(
+                PersistValidationHashesRequest(
+                    submission_id=str(projection["run"]["submission_id"]),
+                    organisation_codes=organisation_codes or None,
+                    template_keys=template_keys or None,
+                    modified_by="system",
+                    idempotency_key=f"persist-validation-hashes-{projection['run']['run_id']}-{self._hash_payload(result_summary)}",
+                    reason=f"Persist validation hashes for run {projection['run']['run_id']}",
+                    validation_run_id=str(projection["run"]["run_id"]),
+                )
+            )
 
     def _require_submission(self, submission_id: str) -> dict[str, Any]:
         submission = self._submission_resolver(submission_id)
@@ -1619,6 +1668,31 @@ class ValidationRunApi:
         return organisation_changes, template_changes
 
     @staticmethod
+    def _build_submission_hash_updates(
+        projection: dict[str, Any],
+        *,
+        passed_asset_keys: list[str],
+    ) -> tuple[list[str], list[str]]:
+        passed = set(passed_asset_keys)
+        organisation_codes: set[str] = set()
+        template_keys: set[str] = set()
+        for asset_payload in projection["asset_snapshots"]:
+            asset_key = str(asset_payload["asset_key"])
+            if asset_key not in passed:
+                continue
+            if str(asset_payload["asset_type"]) == "organisation_input":
+                organisation_codes.update(
+                    str(org_cd).strip().upper()
+                    for org_cd in asset_payload.get("organisation_cds", [])
+                    if str(org_cd).strip()
+                )
+                continue
+            template_key = asset_key.split("::", 1)[0].strip().upper()
+            if template_key:
+                template_keys.add(template_key)
+        return sorted(organisation_codes), sorted(template_keys)
+
+    @staticmethod
     def _hash_payload(payload: dict[str, Any]) -> str:
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -1654,6 +1728,7 @@ class InMemoryValidationRunApi(ValidationRunApi):
         pipeline_trigger: Callable[[dict[str, Any]], PipelineRef | dict[str, Any]] | None = None,
         pipeline_status_resolver: Callable[[PipelineRef, dict[str, Any]], dict[str, Any] | str] | None = None,
         submission_flag_setter: Callable[[str, dict[str, str] | None, dict[str, str] | None, str, str, str | None], Any] | None = None,
+        submission_hash_persister: Callable[[PersistValidationHashesRequest], Any] | None = None,
         now_fn: Callable[[], datetime] | None = None,
         id_fn: Callable[[], str] | None = None,
     ):
@@ -1662,6 +1737,7 @@ class InMemoryValidationRunApi(ValidationRunApi):
             event_store=InMemoryRunEventStore(),
             idempotency_store=InMemoryIdempotencyStore(),
             submission_flag_setter=submission_flag_setter,
+            submission_hash_persister=submission_hash_persister,
             asset_stager=asset_stager,
             pipeline_trigger=pipeline_trigger,
             pipeline_status_resolver=pipeline_status_resolver,

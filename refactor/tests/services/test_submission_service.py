@@ -9,8 +9,10 @@ from refactor.services.data_validation_api.submission_service import (
     EditSubmissionRequest,
     ListSubmissionsRequest,
     ListEditHistoryRequest,
+    PersistValidationHashesRequest,
     RefreshSubmissionRequest,
     SetValidationFlagsRequest,
+    SubmissionEvent,
     VALIDATION_NOT_VALIDATED,
     VALIDATION_VALIDATED,
     JsonFileIdempotencyStore,
@@ -82,6 +84,14 @@ class SubmissionServiceTests(unittest.TestCase):
 
     def _set_validation_flags(self, service: ValidationServiceApi, request: SetValidationFlagsRequest | None = None, **kwargs):
         return service.set_validation_flags(request or SetValidationFlagsRequest(**kwargs))
+
+    def _persist_validation_hashes(
+        self,
+        service: ValidationServiceApi,
+        request: PersistValidationHashesRequest | None = None,
+        **kwargs,
+    ):
+        return service.persist_validation_hashes(request or PersistValidationHashesRequest(**kwargs))
 
     def test_create_submission_and_list_submissions(self):
         service = self._service()
@@ -226,6 +236,43 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertEqual(complete.data["organisations"]["ORG1"]["validation_flag"], VALIDATION_VALIDATED)
         self.assertEqual(complete.data["state"], VALIDATION_VALIDATED)
 
+    def test_persist_validation_hashes_updates_hashes_without_changing_flags(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={"org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN")},
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1")},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
+        )
+        assert created.data is not None
+
+        updated = self._persist_validation_hashes(service,
+            PersistValidationHashesRequest(
+                submission_id=created.data["submission_id"],
+                organisation_codes=["org1"],
+                template_keys=["tpl_main"],
+                modified_by="system",
+                idempotency_key="persist-1",
+                validation_run_id="run-123",
+                reason="Persist hashes after run",
+            )
+        )
+
+        self.assertTrue(updated.ok)
+        assert updated.data is not None
+        org_tracked = updated.data["organisations"]["ORG1"]["file"]["tracked_files"][0]
+        tpl_tracked = updated.data["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]
+        self.assertEqual(updated.data["organisations"]["ORG1"]["validation_flag"], VALIDATION_NOT_VALIDATED)
+        self.assertEqual(updated.data["templates"]["TPL_MAIN"]["validation_flag"], VALIDATION_NOT_VALIDATED)
+        self.assertEqual(org_tracked["validated_hash"], org_tracked["current_hash"])
+        self.assertEqual(org_tracked["validation_run_id"], "run-123")
+        self.assertEqual(tpl_tracked["validated_hash"], tpl_tracked["current_hash"])
+        self.assertEqual(tpl_tracked["validation_run_id"], "run-123")
+
     def test_edit_submission_can_add_company_and_template(self):
         service = self._service()
         created = self._create_submission(service,
@@ -344,6 +391,55 @@ class SubmissionServiceTests(unittest.TestCase):
         self.assertTrue(edited.ok)
         assert edited.data is not None
         self.assertEqual(edited.data["note"], "First note")
+
+    def test_edit_submission_can_update_note_when_existing_template_links_are_stale(self):
+        service = self._service()
+        created = self._create_submission(service,
+            CreateSubmissionRequest(
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisations={
+                    "org1": self._org_ref("drive", "Drive A", "org1/file.xlsx", "TPL_MAIN"),
+                    "srn": self._org_ref("drive", "Drive A", "srn/file.xlsx", "TPL_MAIN"),
+                },
+                templates={"tpl_main": self._template_ref("drive", "Templates", "templates/main.xlsx", "ORG1", "SRN")},
+                created_by="alice@example.com",
+                idempotency_key="create-1",
+            )
+        )
+        assert created.data is not None
+        submission_id = created.data["submission_id"]
+
+        service._events.append(  # noqa: SLF001
+            SubmissionEvent(
+                event_id="event-remove-srn",
+                event_ts_utc=service._utc_now_iso(),  # noqa: SLF001
+                event_type="submission_org_removed",
+                submission_id=submission_id,
+                process_cd="PROC_A",
+                submission_period_cd="2026M01",
+                organisation_cd="SRN",
+                sharepoint_source=None,
+                validation_flag=None,
+                actor="system",
+                reason="Simulate stale template applies_to links",
+                payload_json=None,
+            )
+        )
+
+        edited = self._edit_submission(service,
+            EditSubmissionRequest(
+                submission_id=submission_id,
+                modified_by="bob@example.com",
+                idempotency_key="edit-1",
+                note="Updated note",
+                reason="Clarify submission",
+            )
+        )
+
+        self.assertTrue(edited.ok)
+        assert edited.data is not None
+        self.assertEqual(edited.data["note"], "Updated note")
 
     def test_edit_submission_can_update_validation_flags(self):
         service = self._service()

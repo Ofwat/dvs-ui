@@ -300,6 +300,7 @@ def build_run_api(config: dict[str, Any], submission_service: ValidationServiceA
                 return item
         return None
     submission_flag_setter = submission_service.set_validation_flags if submission_service is not None else None
+    submission_hash_persister = submission_service.persist_validation_hashes if submission_service is not None else None
 
     workspaces_ok, workspaces_payload = list_fabric_workspaces()
     require_ok("list_fabric_workspaces", workspaces_ok, workspaces_payload)
@@ -447,6 +448,7 @@ def build_run_api(config: dict[str, Any], submission_service: ValidationServiceA
     return ValidationRunApi(
         submission_resolver=submission_resolver,
         submission_flag_setter=submission_flag_setter,
+        submission_hash_persister=submission_hash_persister,
         event_store=TextBackedRunEventStore(
             read_text=lambda: read_text(runs_events_path),
             write_text=lambda content: write_text(runs_events_path, content),

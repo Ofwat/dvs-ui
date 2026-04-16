@@ -174,6 +174,7 @@ class ValidationRunApiTests(unittest.TestCase):
         api = ValidationRunApi(
             submission_resolver=lambda submission_id: service._get_submission_projection(submission_id),  # noqa: SLF001
             submission_flag_setter=service.set_validation_flags,
+            submission_hash_persister=service.persist_validation_hashes,
             event_store=JsonlRunEventStore(runs_events_path),
             idempotency_store=JsonFileIdempotencyStore(runs_idempotency_path),
             runs_projection_store=JsonProjectionStore(runs_projection_path),
@@ -231,6 +232,72 @@ class ValidationRunApiTests(unittest.TestCase):
         self.assertTrue(runs_projection_path.exists())
         self.assertTrue(runs_idempotency_path.exists())
 
+    def test_finalize_run_persists_hashes_without_marking_submission_validated(self):
+        service = self._submission_service()
+        created = self._create_submission(service,
+            process_cd="PROC_A",
+            submission_period_cd="2026M01",
+            organisations={
+                "ORG001": OrganisationSubmissionRef(
+                    sharepoint_source=self._source("company.xlsx", current_hash="company-hash"),
+                    template_keys=["TPL_MAIN"],
+                )
+            },
+            templates={
+                "TPL_MAIN": TemplateSubmissionRef(
+                    assignment_mode="shared",
+                    applies_to=["ORG001"],
+                    sharepoint_source=self._source("template.xlsx", current_hash="template-hash"),
+                )
+            },
+            created_by="alice@example.com",
+            idempotency_key="create-hash-persist-1",
+        )
+        assert created.data is not None
+
+        api = ValidationRunApi(
+            submission_resolver=lambda submission_id: service._get_submission_projection(submission_id),  # noqa: SLF001
+            submission_hash_persister=service.persist_validation_hashes,
+        )
+        created_run = api.create_run(
+            CreateRunRequest(
+                submission_id=created.data["submission_id"],
+                requested_by="alice@example.com",
+                idempotency_key="run-hash-persist-1",
+                requested_organisations=["ORG001"],
+            )
+        )
+        api.stage_run_inputs(StageRunInputsRequest(run_id=created_run.run.run_id, staged_by="alice@example.com"))
+        api.trigger_run(TriggerRunRequest(run_id=created_run.run.run_id, triggered_by="alice@example.com"))
+
+        finalized = api.finalize_run(
+            FinalizeRunRequest(
+                run_id=created_run.run.run_id,
+                finalized_by="alice@example.com",
+                result_payload={
+                    "asset_results": [
+                        {"asset_key": "ORG001_FILE::company.xlsx", "status": "passed"},
+                        {"asset_key": "TPL_MAIN::template.xlsx", "status": "passed"},
+                    ]
+                },
+            )
+        )
+
+        self.assertEqual(finalized.state, "succeeded")
+        self.assertIsNone(finalized.submission_update)
+        refreshed_submission = self._list_submissions(service, process_cd="PROC_A")
+        assert refreshed_submission.data is not None
+        org_entry = refreshed_submission.data[0]["organisations"]["ORG001"]
+        tpl_entry = refreshed_submission.data[0]["templates"]["TPL_MAIN"]
+        org_tracked = org_entry["file"]["tracked_files"][0]
+        tpl_tracked = tpl_entry["file"]["tracked_files"][0]
+        self.assertEqual(org_entry["validation_flag"], "not_validated")
+        self.assertEqual(tpl_entry["validation_flag"], "not_validated")
+        self.assertEqual(org_tracked["validated_hash"], "company-hash")
+        self.assertEqual(org_tracked["validation_run_id"], created_run.run.run_id)
+        self.assertEqual(tpl_tracked["validated_hash"], "template-hash")
+        self.assertEqual(tpl_tracked["validation_run_id"], created_run.run.run_id)
+
     def test_poll_run_waits_until_terminal_status(self):
         service = self._submission_service()
         created = self._create_submission(service,
@@ -259,6 +326,7 @@ class ValidationRunApiTests(unittest.TestCase):
         api = ValidationRunApi(
             submission_resolver=lambda submission_id: service._get_submission_projection(submission_id),  # noqa: SLF001
             submission_flag_setter=service.set_validation_flags,
+            submission_hash_persister=service.persist_validation_hashes,
             pipeline_status_resolver=lambda _pipeline, _projection: {"status": next(statuses)},
         )
         created_run = api.create_run(
@@ -288,10 +356,10 @@ class ValidationRunApiTests(unittest.TestCase):
         assert refreshed_submission.data is not None
         org_tracked = refreshed_submission.data[0]["organisations"]["ORG001"]["file"]["tracked_files"][0]
         tpl_tracked = refreshed_submission.data[0]["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]
-        self.assertIsNone(org_tracked["validated_hash"])
-        self.assertIsNone(org_tracked["validation_run_id"])
-        self.assertIsNone(tpl_tracked["validated_hash"])
-        self.assertIsNone(tpl_tracked["validation_run_id"])
+        self.assertEqual(org_tracked["validated_hash"], "company-hash")
+        self.assertEqual(org_tracked["validation_run_id"], created_run.run.run_id)
+        self.assertEqual(tpl_tracked["validated_hash"], "template-hash")
+        self.assertEqual(tpl_tracked["validation_run_id"], created_run.run.run_id)
 
     def test_list_running_runs_returns_only_active_runs_in_descending_order(self):
         service = self._submission_service()
@@ -401,6 +469,7 @@ class ValidationRunApiTests(unittest.TestCase):
         api = ValidationRunApi(
             submission_resolver=lambda submission_id: service._get_submission_projection(submission_id),  # noqa: SLF001
             submission_flag_setter=service.set_validation_flags,
+            submission_hash_persister=service.persist_validation_hashes,
             pipeline_status_resolver=lambda _pipeline, _projection: {"status": next(statuses)},
         )
         queued = api.create_run(
@@ -435,10 +504,10 @@ class ValidationRunApiTests(unittest.TestCase):
         assert refreshed_submission.data is not None
         org_tracked = refreshed_submission.data[0]["organisations"]["ORG001"]["file"]["tracked_files"][0]
         tpl_tracked = refreshed_submission.data[0]["templates"]["TPL_MAIN"]["file"]["tracked_files"][0]
-        self.assertIsNone(org_tracked["validated_hash"])
-        self.assertIsNone(org_tracked["validation_run_id"])
-        self.assertIsNone(tpl_tracked["validated_hash"])
-        self.assertIsNone(tpl_tracked["validation_run_id"])
+        self.assertEqual(org_tracked["validated_hash"], "company-hash")
+        self.assertEqual(org_tracked["validation_run_id"], running.run.run_id)
+        self.assertEqual(tpl_tracked["validated_hash"], "template-hash")
+        self.assertEqual(tpl_tracked["validation_run_id"], running.run.run_id)
 
     def test_get_run_persists_external_pipeline_metadata(self):
         service = self._submission_service()
