@@ -3,3 +3,6 @@ plotly
 gov-uk-dashboards
 dash_svg
 questionary
+azure-identity
+azure-core
+
