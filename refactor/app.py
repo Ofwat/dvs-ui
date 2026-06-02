@@ -10,7 +10,6 @@ from dash.exceptions import PreventUpdate
 
 from components.header import build_header
 from components.service_navigation import build_service_navigation
-from example_dqchecks import perform_checks
 from pages import DEFAULT_PAGE, get_navigation_pages, get_page_by_path
 from pages.data_validation_service import register_online_mode_callbacks
 from template_utils import build_index_string
@@ -150,6 +149,9 @@ def update_upload_status(contents: str | None, filename: str | None, upload_id: 
 def update_union_table(template_data, final_data):
     if not template_data or not final_data:
         raise PreventUpdate
+
+    # Defer the workbook-validation stack until the offline upload flow actually needs it.
+    from example_dqchecks import perform_checks
 
     template_path = save_upload_content(template_data)
     final_path = save_upload_content(final_data)
