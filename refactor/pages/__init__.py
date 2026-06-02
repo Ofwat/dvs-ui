@@ -3,6 +3,10 @@ from __future__ import annotations
 from .get_started import build_get_started_content
 from .home import build_home_content, build_home_masthead
 from .services import build_services_content
+from .dimension_loader_service import (
+    DIMENSION_LOADER_SERVICE,
+    build_dimension_loader_content,
+)
 from .data_validation_service import (
     SERVICE_DETAIL_PAGES,
     build_mode_detail,
@@ -36,6 +40,15 @@ _BASE_DEFINITIONS = [
 ]
 
 _DETAIL_PAGE_DEFINITIONS = []
+_DETAIL_PAGE_DEFINITIONS.append(
+    {
+        "label": DIMENSION_LOADER_SERVICE["label"],
+        "path": DIMENSION_LOADER_SERVICE["path"],
+        "content": build_dimension_loader_content,
+        "nav": False,
+        "nav_class": "govuk-service-navigation app-service-navigation",
+    }
+)
 for service in SERVICE_DETAIL_PAGES:
     _DETAIL_PAGE_DEFINITIONS.append(
         {
