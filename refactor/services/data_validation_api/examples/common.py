@@ -46,7 +46,9 @@ def require_ok(action: str, success: bool, payload: Any):
 
 
 def ensure_authenticated():
-    auth_ok, auth_payload = check_token_access(force=True)
+    # Use the normal token path here so an existing signed-in session can be reused
+    # instead of forcing a fresh browser auth round-trip on every command.
+    auth_ok, auth_payload = check_token_access()
     require_ok("check_token_access", auth_ok, auth_payload)
 
 

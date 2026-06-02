@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import base64
+import platform
 import os
+import socket
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from urllib.parse import parse_qs
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 from azure.identity import InteractiveBrowserCredential
+from azure.identity._internal import within_dac, wrap_exceptions
 try:
     from azure.core.exceptions import ClientAuthenticationError
 except ImportError:
@@ -81,6 +88,145 @@ TOKEN_CACHE_NAME = os.getenv("AZURE_TOKEN_CACHE_NAME", "dvs-ui-token-cache")
 AUTH_RECORD_PATH = Path.home() / ".dvs-ui" / "azure-auth-record.json"
 
 
+def _initiate_auth_code_flow(app: Any, scopes: list[str], redirect_uri: str, *, claims: str | None, login_hint: str | None):
+    return app.initiate_auth_code_flow(
+        scopes,
+        redirect_uri=redirect_uri,
+        prompt="select_account",
+        claims_challenge=claims,
+        login_hint=login_hint,
+        response_mode="form_post",
+    )
+
+
+def _open_browser(url: str) -> bool:
+    opened = webbrowser.open(url)
+    if not opened:
+        uname = platform.uname()
+        system = uname[0].lower()
+        release = uname[2].lower()
+        if "microsoft" in release and system == "linux":
+            kwargs = {"timeout": 5}
+
+            try:
+                exit_code = subprocess.call(
+                    ["powershell.exe", "-NoProfile", "-Command", 'Start-Process "{}"'.format(url)], **kwargs
+                )
+                opened = exit_code == 0
+            except Exception:  # pylint:disable=broad-except
+                # powershell.exe isn't available, or the subprocess timed out
+                pass
+    return opened
+
+
+class _FormPostInteractiveBrowserCredential(InteractiveBrowserCredential):
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("_server_class", _FormPostAuthCodeRedirectServer)
+        super().__init__(**kwargs)
+
+    @wrap_exceptions
+    def _request_token(self, *scopes: str, **kwargs) -> dict:
+        server = None
+        redirect_uri = ""
+        if self._parsed_url:
+            try:
+                redirect_uri = "http://{}:{}".format(self._parsed_url.hostname, self._parsed_url.port)
+                server = self._server_class(self._parsed_url.hostname, self._parsed_url.port, timeout=self._timeout)
+            except socket.error as ex:
+                raise ClientAuthenticationError(message="Couldn't start an HTTP server on " + redirect_uri) from ex
+        else:
+            for port in range(8400, 9000):
+                try:
+                    server = self._server_class("localhost", port, timeout=self._timeout)
+                    redirect_uri = "http://localhost:{}".format(port)
+                    break
+                except socket.error:
+                    continue
+
+        if not server:
+            raise ClientAuthenticationError(message="Couldn't start an HTTP server on localhost")
+
+        scopes = list(scopes)
+        claims = kwargs.get("claims")
+        app = self._get_app(**kwargs)
+        flow = _initiate_auth_code_flow(
+            app,
+            scopes,
+            redirect_uri,
+            claims=claims,
+            login_hint=self._login_hint,
+        )
+        if "auth_uri" not in flow:
+            raise ClientAuthenticationError("Failed to begin authentication flow")
+
+        if not _open_browser(flow["auth_uri"]):
+            raise ClientAuthenticationError(message="Failed to open a browser")
+
+        response = server.wait_for_redirect()
+        if not response:
+            if within_dac.get():
+                raise ClientAuthenticationError(
+                    message="Timed out after waiting {} seconds for the user to authenticate".format(self._timeout)
+                )
+            raise ClientAuthenticationError(
+                message="Timed out after waiting {} seconds for the user to authenticate".format(self._timeout)
+            )
+
+        return app.acquire_token_by_auth_code_flow(flow, response, scopes=scopes, claims_challenge=claims)
+
+
+class _FormPostAuthCodeRedirectHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.endswith("/favicon.ico"):
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        query = self.path.split("?", 1)[-1]
+        parsed = parse_qs(query, keep_blank_values=True)
+        self.server.query_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in parsed.items()}
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Authentication complete. You can close this window.")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        parsed = parse_qs(body, keep_blank_values=True)
+        self.server.query_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in parsed.items()}
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Authentication complete. You can close this window.")
+
+    def log_message(self, format, *args):  # pylint: disable=redefined-builtin
+        pass
+
+
+class _FormPostAuthCodeRedirectServer(HTTPServer):
+    query_params: dict[str, Any] = {}
+
+    def __init__(self, hostname: str, port: int, timeout: int) -> None:
+        HTTPServer.__init__(self, (hostname, port), _FormPostAuthCodeRedirectHandler)
+        self.timeout = timeout
+
+    def wait_for_redirect(self) -> dict[str, Any]:
+        while not self.query_params:
+            try:
+                self.handle_request()
+            except (IOError, ValueError):
+                break
+
+        self.server_close()
+        return self.query_params
+
+    def handle_timeout(self):
+        self.server_close()
+
+
 def _load_auth_record() -> Any | None:
     if not AuthenticationRecord or not AUTH_RECORD_PATH.exists():
         return None
@@ -116,7 +262,7 @@ def _build_credential(ignore_saved_auth: bool = False) -> InteractiveBrowserCred
     client_id = os.getenv("AZURE_CLIENT_ID")
     if client_id:
         kwargs["client_id"] = client_id
-    return InteractiveBrowserCredential(**kwargs)
+    return _FormPostInteractiveBrowserCredential(**kwargs)
 
 
 _CREDENTIAL: InteractiveBrowserCredential | None = None
@@ -134,10 +280,6 @@ def _acquire_token(scope: str):
     try:
         return credential.get_token(scope)
     except ClientAuthenticationError:
-        _clear_auth_record()
-    except Exception:
-        if _load_auth_record() is None:
-            raise
         _clear_auth_record()
 
     credential = _get_credential(force_rebuild=True, ignore_saved_auth=True)
