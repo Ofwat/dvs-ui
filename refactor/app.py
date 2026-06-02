@@ -12,6 +12,7 @@ from components.header import build_header
 from components.service_navigation import build_service_navigation
 from pages import DEFAULT_PAGE, get_navigation_pages, get_page_by_path
 from pages.data_validation_service import register_online_mode_callbacks
+from pages.dimension_loader_service import register_dimension_loader_callbacks
 from template_utils import build_index_string
 from env_utils import load_env
 
@@ -57,6 +58,7 @@ app.layout = html.Div(
 )
 
 register_online_mode_callbacks(app)
+register_dimension_loader_callbacks(app)
 
 
 @app.callback(
