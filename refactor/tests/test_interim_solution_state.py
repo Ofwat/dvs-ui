@@ -211,12 +211,13 @@ class InterimSolutionStateTests(unittest.TestCase):
             mock_thread.side_effect = _FakeThread
             with patch("pages.interim_solution_service._build_run_folder_name", return_value="20260603T120000Z_abcd1234"):
                 with patch("services.fabric_uploader_cli.app._online_auth", return_value=auth):
-                    status, progress, detail, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
+                    status, progress, detail, transfer, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
 
         self.assertIn("Sync started for DEV", status)
         self.assertEqual(progress, "0/1")
         self.assertIn("DEV", detail)
         self.assertIn("20260603T120000Z_abcd1234", detail)
+        self.assertIn("Waiting for transfer progress", transfer)
         self.assertFalse(disabled)
         live_state = iss._get_sync_state(str(state["run_id"]))  # noqa: SLF001
         self.assertEqual(iss._build_progress_text(live_state), "1/1")  # noqa: SLF001

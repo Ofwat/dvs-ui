@@ -59,6 +59,7 @@ def _create_sync_state(environment: str | None, total_files: int = 0) -> dict[st
         "status": "",
         "current_job": "",
         "current_file": "",
+        "current_transfer": "",
         "processed_files": 0,
         "total_files": total_files,
         "error": None,
@@ -117,6 +118,15 @@ def _build_progress_detail(state: dict[str, object] | None) -> str:
     return f"{environment} | Waiting to start"
 
 
+def _build_transfer_text(state: dict[str, object] | None) -> str:
+    if not state:
+        return ""
+    current_transfer = str(state.get("current_transfer", "")).strip()
+    if current_transfer:
+        return current_transfer
+    return "Waiting for transfer progress..."
+
+
 def build_interim_solution_content():
     return html.Div(
         className="govuk-grid-row govuk-!-margin-bottom-6",
@@ -158,6 +168,10 @@ def build_interim_solution_content():
                     html.Div(
                         id="interim-solution-progress-detail",
                         className="govuk-!-margin-top-1 govuk-body",
+                    ),
+                    html.Div(
+                        id="interim-solution-transfer",
+                        className="govuk-!-margin-top-1 govuk-body govuk-!-font-family-monospace",
                     ),
                     html.Div(
                         id="interim-solution-results",
@@ -398,6 +412,7 @@ def _interim_sync_worker(
             status=f"Syncing {selected_env.upper()}...",
             current_job="",
             current_file="",
+            current_transfer="",
             current_job_folder=run_folder_name,
             processed_files=0,
             total_files=total_files,
@@ -447,12 +462,20 @@ def _interim_sync_worker(
                     file_bytes = uploader._download_sharepoint_bytes_with_progress(  # noqa: SLF001
                         folder_url,
                         source_relative_path,
+                        progress_callback=lambda line, run_id=run_id: _set_sync_state(
+                            run_id,
+                            current_transfer=str(line),
+                        ),
                     )
                     uploader._upload_bytes_with_progress(  # noqa: SLF001
                         workspace_id,
                         lakehouse_id,
                         target_relative_path,
                         file_bytes,
+                        progress_callback=lambda line, run_id=run_id: _set_sync_state(
+                            run_id,
+                            current_transfer=str(line),
+                        ),
                     )
                     successes += 1
                 except Exception as exc:  # pylint:disable=broad-except
@@ -466,6 +489,7 @@ def _interim_sync_worker(
                         processed_files=processed_files,
                         total_files=total_files,
                         current_file=source_relative_path,
+                        current_transfer=f"Uploading {target_relative_path}",
                         status=f"Processing {processed_files}/{total_files}",
                     )
 
@@ -482,6 +506,7 @@ def _interim_sync_worker(
                 _set_sync_state(
                     run_id,
                     current_job=job_name,
+                    current_transfer="",
                     status=f"Skipping pipeline trigger for {job_name} because {job_failures} file(s) failed.",
                 )
                 continue
@@ -490,6 +515,7 @@ def _interim_sync_worker(
             _set_sync_state(
                 run_id,
                 current_job=job_name,
+                current_transfer="",
                 status=f"Triggering pipeline for {job_name}",
             )
             try:
@@ -501,6 +527,7 @@ def _interim_sync_worker(
                 _set_sync_state(
                     run_id,
                     current_job=job_name,
+                    current_transfer="",
                     status=(
                         f"Triggered pipeline for {job_name}"
                         + (f" run_id={pipeline_run_id}" if pipeline_run_id else "")
@@ -512,6 +539,7 @@ def _interim_sync_worker(
                 _set_sync_state(
                     run_id,
                     current_job=job_name,
+                    current_transfer="",
                     status=f"Pipeline trigger failed for {job_name}: {exc}",
                 )
 
@@ -521,6 +549,7 @@ def _interim_sync_worker(
             done=True,
             current_job=last_job_name,
             current_file=last_file_name,
+            current_transfer="",
             current_job_folder=run_folder_name,
             processed_files=processed_files,
             total_files=total_files,
@@ -584,6 +613,7 @@ def _start_sync_run(uploader, config: dict[str, object], selected_env: str, jobs
         f"Sync started for {selected_env.upper()}.",
         "0/{}".format(total_files) if total_files else "0/0",
         _build_progress_detail(state),
+        _build_transfer_text(state),
         state,
         False,
     )
@@ -594,7 +624,7 @@ def _sync_dimension_jobs(environment: str | None):
     selected_env = environment if environment in {"dev", "prod"} else "dev"
     _debug(f"Sync requested env={selected_env}")
     if config_error:
-        return config_error, "", "", {"environment": selected_env, "running": False, "done": True}, True
+        return config_error, "", "", "", {"environment": selected_env, "running": False, "done": True}, True
 
     missing_env_vars = get_missing_env_vars()
     if missing_env_vars:
@@ -603,7 +633,7 @@ def _sync_dimension_jobs(environment: str | None):
             + ", ".join(missing_env_vars)
             + "."
         )
-        return message, "", "", {"environment": selected_env, "running": False, "done": True}, True
+        return message, "", "", "", {"environment": selected_env, "running": False, "done": True}, True
 
     jobs = [
         job
@@ -615,6 +645,7 @@ def _sync_dimension_jobs(environment: str | None):
             f"No enabled SharePoint folder jobs found for {selected_env.upper()}.",
             "0/0",
             f"{selected_env.upper()} | Waiting to start",
+            "",
             {"environment": selected_env, "running": False, "done": True, "processed_files": 0, "total_files": 0},
             True,
         )
@@ -636,6 +667,7 @@ def register_interim_solution_callbacks(app):
         Output("interim-solution-status", "children"),
         Output("interim-solution-progress", "children"),
         Output("interim-solution-progress-detail", "children"),
+        Output("interim-solution-transfer", "children"),
         Output("interim-solution-results", "children"),
         Output("interim-solution-sync-state", "data"),
         Output("interim-solution-sync-poll", "disabled"),
@@ -654,13 +686,13 @@ def register_interim_solution_callbacks(app):
         _debug(f"Callback action trigger={component_id} environment={environment}")
         if component_id == "interim-solution-refresh":
             status = _build_action_result(component_id, environment)
-            return status, "", "", no_update, None, True
+            return status, "", "", "", no_update, None, True
         if component_id == "interim-solution-list":
             status = _build_action_result(component_id, environment)
-            return status, "", "", _build_list_results(environment), None, True
+            return status, "", "", "", _build_list_results(environment), None, True
         if component_id == "interim-solution-sync":
-            status, progress, detail, state, disabled = _sync_dimension_jobs(environment)
-            return status, progress, detail, no_update, state, disabled
+            status, progress, detail, transfer, state, disabled = _sync_dimension_jobs(environment)
+            return status, progress, detail, transfer, no_update, state, disabled
         if component_id == "interim-solution-environment":
             raise PreventUpdate
         raise PreventUpdate
@@ -668,6 +700,7 @@ def register_interim_solution_callbacks(app):
     @app.callback(
         Output("interim-solution-progress", "children", allow_duplicate=True),
         Output("interim-solution-progress-detail", "children", allow_duplicate=True),
+        Output("interim-solution-transfer", "children", allow_duplicate=True),
         Output("interim-solution-status", "children", allow_duplicate=True),
         Output("interim-solution-sync-state", "data", allow_duplicate=True),
         Output("interim-solution-sync-poll", "disabled", allow_duplicate=True),
@@ -681,6 +714,7 @@ def register_interim_solution_callbacks(app):
             raise PreventUpdate
         progress = _build_progress_text(state)
         detail = _build_progress_detail(state)
+        transfer = _build_transfer_text(state)
         status = str(state.get("status", "")).strip()
         disabled = not bool(state.get("running", False))
-        return progress, detail, status, state, disabled
+        return progress, detail, transfer, status, state, disabled
