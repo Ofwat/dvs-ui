@@ -167,7 +167,8 @@ class InterimSolutionStateTests(unittest.TestCase):
         ],
     )
     @patch("pages.interim_solution_service.load_service_config", return_value=({"jobs": []}, None))
-    def test_sync_action_updates_counter(self, *_):
+    def test_sync_action_updates_counter(self, *mocks):
+        upload_bytes_with_progress = mocks[-1]
         auth = type(
             "Auth",
             (),
@@ -190,16 +191,24 @@ class InterimSolutionStateTests(unittest.TestCase):
                         self.target(*self.args, **self.kwargs)
 
             mock_thread.side_effect = _FakeThread
-            with patch("services.fabric_uploader_cli.app._online_auth", return_value=auth):
-                status, progress, detail, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
+            with patch("pages.interim_solution_service._build_run_folder_name", return_value="20260603T120000Z_abcd1234"):
+                with patch("services.fabric_uploader_cli.app._online_auth", return_value=auth):
+                    status, progress, detail, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
 
         self.assertIn("Sync started for DEV", status)
         self.assertEqual(progress, "0/1")
         self.assertIn("DEV", detail)
+        self.assertIn("20260603T120000Z_abcd1234", detail)
         self.assertFalse(disabled)
         live_state = iss._get_sync_state(str(state["run_id"]))  # noqa: SLF001
         self.assertEqual(iss._build_progress_text(live_state), "1/1")  # noqa: SLF001
         self.assertIn("file1.xlsx", iss._build_progress_detail(live_state))  # noqa: SLF001
+        self.assertIn("20260603T120000Z_abcd1234", iss._build_progress_detail(live_state))  # noqa: SLF001
+        upload_bytes_with_progress.assert_called_once()
+        self.assertEqual(
+            upload_bytes_with_progress.call_args.args[2],
+            "Files/test/20260603T120000Z_abcd1234/dev/file1.xlsx",
+        )
 
 
 if __name__ == "__main__":

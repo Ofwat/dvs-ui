@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
@@ -31,6 +32,11 @@ INTERIM_SOLUTION_SERVICE = {
 
 def _debug(message: str) -> None:
     print(f"[InterimSolution] {message}", flush=True)
+
+
+def _build_run_folder_name() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}_{uuid.uuid4().hex[:8]}"
 
 
 def _create_sync_state(environment: str | None, total_files: int = 0) -> dict[str, object]:
@@ -82,13 +88,20 @@ def _build_progress_detail(state: dict[str, object] | None) -> str:
     environment = str(state.get("environment", "dev")).upper()
     current_job = str(state.get("current_job", "")).strip()
     current_file = str(state.get("current_file", "")).strip()
+    current_job_folder = str(state.get("current_job_folder", "")).strip()
     status = str(state.get("status", "")).strip()
+    if current_job and current_file and current_job_folder:
+        return f"{environment} | {current_job} | {current_file} | {current_job_folder}"
     if current_job and current_file:
         return f"{environment} | {current_job} | {current_file}"
+    if current_file and current_job_folder:
+        return f"{environment} | {current_file} | {current_job_folder}"
     if current_file:
         return f"{environment} | {current_file}"
     if current_job:
         return f"{environment} | {current_job}"
+    if current_job_folder:
+        return f"{environment} | {current_job_folder}"
     if status:
         return f"{environment} | {status}"
     return f"{environment} | Waiting to start"
@@ -322,9 +335,10 @@ def _interim_sync_worker(
     total_files: int,
 ) -> None:
     try:
+        run_folder_name = str(config.get("_run_folder_name", "")).strip() or _build_run_folder_name()
         _debug(
             f"Starting worker run_id={run_id} env={selected_env} "
-            f"jobs={len(prepared_jobs)} total_files={total_files}"
+            f"jobs={len(prepared_jobs)} total_files={total_files} run_folder={run_folder_name}"
         )
         auth = uploader._online_auth()
         auth._ensure_authenticated(auth.SHAREPOINT_SCOPE)
@@ -335,6 +349,7 @@ def _interim_sync_worker(
             status=f"Syncing {selected_env.upper()}...",
             current_job="",
             current_file="",
+            current_job_folder=run_folder_name,
             processed_files=0,
             total_files=total_files,
         )
@@ -373,7 +388,9 @@ def _interim_sync_worker(
                 if not source_relative_path:
                     continue
                 last_file_name = source_relative_path
-                target_relative_path = "/".join(part for part in [target_root, source_relative_path] if part)
+                target_relative_path = "/".join(
+                    part for part in [target_root, run_folder_name, source_relative_path] if part
+                )
                 _debug(f"Uploading {source_relative_path} for job={job_name}")
                 try:
                     file_bytes = uploader._download_sharepoint_bytes_with_progress(  # noqa: SLF001
@@ -406,6 +423,7 @@ def _interim_sync_worker(
             done=True,
             current_job=last_job_name,
             current_file=last_file_name,
+            current_job_folder=run_folder_name,
             processed_files=processed_files,
             total_files=total_files,
             status=(
@@ -435,12 +453,14 @@ def _start_sync_run(uploader, config: dict[str, object], selected_env: str, jobs
             files = []
         prepared_jobs.append({"job": job, "files": files})
         total_files += len(files)
+    run_folder_name = _build_run_folder_name()
     state = _create_sync_state(selected_env, total_files)
     run_id = str(state["run_id"])
-    _SYNC_RUNS[run_id] = state
+    state["current_job_folder"] = run_folder_name
+    _SYNC_RUNS[run_id] = dict(state)
     thread = threading.Thread(
         target=_interim_sync_worker,
-        args=(run_id, uploader, config, selected_env, prepared_jobs, total_files),
+        args=(run_id, uploader, {**config, "_run_folder_name": run_folder_name}, selected_env, prepared_jobs, total_files),
         daemon=True,
     )
     thread.start()
