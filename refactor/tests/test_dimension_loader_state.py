@@ -154,8 +154,14 @@ class DimensionLoaderStateTests(unittest.TestCase):
         self.assertEqual(dls._build_progress_text({"processed_mappings": 3, "total_mappings": 8}), "3/8")  # noqa: SLF001
         self.assertEqual(dls._build_progress_text(None), "")  # noqa: SLF001
         self.assertEqual(
-            dls._build_progress_detail({"environment": "dev", "current_job": "[DEV] Core Dimensions"}),  # noqa: SLF001
-            "DEV | [DEV] Core Dimensions",
+            dls._build_progress_detail(  # noqa: SLF001
+                {
+                    "environment": "dev",
+                    "current_job": "[DEV] Core Dimensions",
+                    "current_file": "assurance_dim.xlsx",
+                }
+            ),
+            "DEV | [DEV] Core Dimensions | assurance_dim.xlsx",
         )
 
     @patch("services.fabric_uploader_cli.app._upload_mapping")
@@ -225,7 +231,12 @@ class DimensionLoaderStateTests(unittest.TestCase):
         self.assertIn("DEV", detail)
         self.assertFalse(disabled)
         self.assertTrue(str(state["run_id"]))
-        self.assertEqual(dls._build_progress_text(dls._get_sync_state(str(state["run_id"]))), "1/1")  # noqa: SLF001
+        live_state = dls._get_sync_state(str(state["run_id"]))  # noqa: SLF001
+        self.assertEqual(dls._build_progress_text(live_state), "1/1")  # noqa: SLF001
+        self.assertEqual(
+            dls._build_progress_detail(live_state),  # noqa: SLF001
+            "DEV | [DEV] Core Dimensions | a.xlsx",
+        )
         upload_mapping.assert_called_once()
 
 

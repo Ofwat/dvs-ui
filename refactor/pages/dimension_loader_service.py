@@ -43,6 +43,7 @@ def _create_sync_state(environment: str | None, total_mappings: int = 0) -> dict
         "done": False,
         "status": "",
         "current_job": "",
+        "current_file": "",
         "processed_mappings": 0,
         "total_mappings": total_mappings,
         "error": None,
@@ -81,7 +82,12 @@ def _build_progress_detail(state: dict[str, object] | None) -> str:
         return ""
     environment = str(state.get("environment", "dev")).upper()
     current_job = str(state.get("current_job", "")).strip()
+    current_file = str(state.get("current_file", "")).strip()
     status = str(state.get("status", "")).strip()
+    if current_job and current_file:
+        return f"{environment} | {current_job} | {current_file}"
+    if current_file:
+        return f"{environment} | {current_file}"
     if current_job:
         return f"{environment} | {current_job}"
     if status:
@@ -263,6 +269,7 @@ def _dimension_loader_sync_worker(
             running=True,
             status=f"Syncing {selected_env.upper()}...",
             current_job="",
+            current_file="",
             processed_mappings=0,
             total_mappings=total_mappings,
         )
@@ -270,8 +277,11 @@ def _dimension_loader_sync_worker(
         processed_mappings = 0
         successes = 0
         failures = 0
+        last_job_name = ""
+        last_file_name = ""
         for job in jobs:
             job_name = str(job.get("name", "")).strip() or "Unnamed job"
+            last_job_name = job_name
             _debug(f"Resolving destination for job={job_name}")
             _set_sync_state(
                 run_id,
@@ -288,6 +298,7 @@ def _dimension_loader_sync_worker(
             mappings = list(job.get("mappings", []) or [])
             for mapping in mappings:
                 source_path = str(mapping.get("source_relative_path", "")).strip()
+                last_file_name = source_path
                 _debug(f"Uploading {source_path} for job={job_name}")
                 try:
                     uploader._upload_mapping(  # noqa: SLF001
@@ -307,6 +318,7 @@ def _dimension_loader_sync_worker(
                         run_id,
                         processed_mappings=processed_mappings,
                         total_mappings=total_mappings,
+                        current_file=source_path,
                         status=f"Processing {processed_mappings}/{total_mappings}",
                     )
 
@@ -314,7 +326,8 @@ def _dimension_loader_sync_worker(
             run_id,
             running=False,
             done=True,
-            current_job=jobs[-1].get("name", "") if jobs else "",
+            current_job=last_job_name,
+            current_file=last_file_name,
             processed_mappings=processed_mappings,
             total_mappings=total_mappings,
             status=(
