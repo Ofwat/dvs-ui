@@ -205,8 +205,8 @@ def _build_progress_board(sync_state: dict[str, object] | None = None):
                         className="govuk-body govuk-!-margin-top-2 govuk-!-margin-bottom-1",
                     ),
                     html.Progress(
-                        value=progress_value,
-                        max=100,
+                        value=str(progress_value),
+                        max="100",
                         className="govuk-!-width-full",
                         style={"width": "100%"},
                     ),
