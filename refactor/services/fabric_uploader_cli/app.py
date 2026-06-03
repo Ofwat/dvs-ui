@@ -120,11 +120,12 @@ def _format_duration(seconds: float | None) -> str:
 
 
 class _TransferProgress:
-    def __init__(self, label: str, total_bytes: int | None):
+    def __init__(self, label: str, total_bytes: int | None, progress_callback=None):
         self.label = label
         self.total_bytes = total_bytes
         self.start = time.time()
         self.last_render = 0.0
+        self.progress_callback = progress_callback
 
     def update(self, completed_bytes: int, *, force: bool = False):
         now = time.time()
@@ -153,6 +154,9 @@ class _TransferProgress:
                 f"ETA {_format_duration(None)} "
                 f"{_format_bytes(speed)}/s"
             )
+        if self.progress_callback is not None:
+            self.progress_callback(line)
+            return
         with _PROGRESS_LOCK:
             sys.stdout.write(f"{line}\n")
             sys.stdout.flush()
@@ -1205,7 +1209,11 @@ def _resolve_sharepoint_item(source_link: str, source_relative_path: str) -> tup
     return {"drive_id": drive_id}, {"id": item_id, "name": item_name}
 
 
-def _download_sharepoint_bytes_with_progress(source_link: str, source_relative_path: str) -> bytes:
+def _download_sharepoint_bytes_with_progress(
+    source_link: str,
+    source_relative_path: str,
+    progress_callback=None,
+) -> bytes:
     auth = _online_auth()
     context, item_payload = _resolve_sharepoint_item(source_link, source_relative_path)
     drive_id = str(context["drive_id"])
@@ -1219,7 +1227,8 @@ def _download_sharepoint_bytes_with_progress(source_link: str, source_relative_p
     content_length = response.headers.get("Content-Length")
     if content_length and content_length.isdigit():
         total_bytes = int(content_length)
-    progress = _TransferProgress(f"Downloading {source_relative_path}", total_bytes)
+    progress = _TransferProgress(f"Downloading {source_relative_path}", total_bytes, progress_callback)
+    progress.update(0, force=True)
     content = bytearray()
     for chunk in response.iter_content(chunk_size=1024 * 1024):
         if not chunk:
@@ -1235,6 +1244,7 @@ def _upload_bytes_with_progress(
     lakehouse_id: str,
     relative_path: str,
     content: bytes,
+    progress_callback=None,
 ) -> None:
     auth = _online_auth()
     auth._ensure_authenticated(auth.ONELAKE_SCOPE)
@@ -1250,7 +1260,8 @@ def _upload_bytes_with_progress(
     )
     if not create.ok:
         raise RuntimeError(f"write_lakehouse_file failed during create: {create.text}")
-    progress = _TransferProgress(f"Uploading {relative_path}", len(content))
+    progress = _TransferProgress(f"Uploading {relative_path}", len(content), progress_callback)
+    progress.update(0, force=True)
     position = 0
     chunk_size = 4 * 1024 * 1024
     while position < len(content):
@@ -1285,6 +1296,7 @@ def _upload_mapping(
     workspace_id: str,
     lakehouse_id: str,
     config: dict[str, Any],
+    progress_callback=None,
 ) -> dict[str, Any]:
     source_relative_path = _normalize_relative_path(mapping.get("source_relative_path", ""))
     target_relative_path = _normalize_relative_path(mapping.get("target_relative_path", ""))
@@ -1295,10 +1307,20 @@ def _upload_mapping(
         source_link = str(mapping.get("source_link", "")).strip()
         if not source_link:
             raise RuntimeError("SharePoint mapping is missing source_link.")
-        content = _download_sharepoint_bytes_with_progress(source_link, source_relative_path)
+        content = _download_sharepoint_bytes_with_progress(
+            source_link,
+            source_relative_path,
+            progress_callback=progress_callback,
+        )
     else:
         raise RuntimeError(f"Unsupported source kind: {job.get('source_kind')}")
-    _upload_bytes_with_progress(workspace_id, lakehouse_id, effective_target_path, content)
+    _upload_bytes_with_progress(
+        workspace_id,
+        lakehouse_id,
+        effective_target_path,
+        content,
+        progress_callback=progress_callback,
+    )
     return {
         "source_relative_path": source_relative_path,
         "target_relative_path": target_relative_path,

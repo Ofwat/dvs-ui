@@ -1,8 +1,13 @@
 import base64
 import tempfile
 from pathlib import Path
+import sys
 
 import os
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import dash
 from dash import Input, Output, State, MATCH, dcc, dash_table, html

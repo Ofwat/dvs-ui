@@ -4,13 +4,16 @@ import tempfile
 import unittest
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 REFACTOR_DIR = Path(__file__).resolve().parents[1]
 if str(REFACTOR_DIR) not in sys.path:
     sys.path.insert(0, str(REFACTOR_DIR))
 
+from pages import dimension_loader_service as dls
 from pages.dimension_loader_state import (
     build_env_missing_message,
+    get_dimension_jobs,
     get_dimension_jobs_by_environment,
     get_missing_env_vars,
     load_service_config,
@@ -18,6 +21,18 @@ from pages.dimension_loader_state import (
 
 
 class DimensionLoaderStateTests(unittest.TestCase):
+    def _count_text(self, node, text: str) -> int:
+        if isinstance(node, (list, tuple)):
+            return sum(self._count_text(child, text) for child in node)
+        if isinstance(node, str):
+            return 1 if text in node else 0
+        children = getattr(node, "children", None)
+        if children is None:
+            return 0
+        if isinstance(children, (list, tuple)):
+            return sum(self._count_text(child, text) for child in children)
+        return self._count_text(children, text)
+
     def test_get_missing_env_vars_reports_required_keys(self):
         missing = get_missing_env_vars({"SHAREPOINT_HOST": "", "SHAREPOINT_SITE_PATH": "sites/ofw-ii"})
         self.assertEqual(missing, ["SHAREPOINT_HOST"])
@@ -37,6 +52,15 @@ class DimensionLoaderStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "missing.json"
             config, error = load_service_config(config_path)
+        self.assertIsNone(config)
+        self.assertIn("No dimensions loader config found", error or "")
+
+    def test_load_service_config_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "services" / "dimensions-loader" / "config.json"
+            self.assertFalse(config_path.parent.exists())
+            config, error = load_service_config(config_path)
+            self.assertTrue(config_path.parent.exists())
         self.assertIsNone(config)
         self.assertIn("No dimensions loader config found", error or "")
 
@@ -81,6 +105,159 @@ class DimensionLoaderStateTests(unittest.TestCase):
         self.assertEqual(len(grouped["prod"]), 1)
         self.assertEqual(grouped["dev"][0]["workspace_display_name"], "dev-ocean")
         self.assertFalse(grouped["prod"][0]["enabled"])
+
+    def test_get_dimension_jobs_filters_by_environment(self):
+        payload = {
+            "jobs": [
+                {"name": "[DEV] A", "source_kind": "sharepoint", "target_root": "Files/dimensions/core"},
+                {"name": "[PROD] B", "source_kind": "sharepoint", "target_root": "Files/dimensions/core"},
+                {"name": "[DEV] C", "source_kind": "local", "target_root": "Files/dimensions/core"},
+            ]
+        }
+        dev_jobs = get_dimension_jobs(payload, "dev")
+        prod_jobs = get_dimension_jobs(payload, "prod")
+        all_jobs = get_dimension_jobs(payload)
+        self.assertEqual(len(dev_jobs), 1)
+        self.assertEqual(len(prod_jobs), 1)
+        self.assertEqual(len(all_jobs), 2)
+
+    @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
+    @patch(
+        "pages.dimension_loader_service.get_dimension_jobs_by_environment",
+        return_value={"dev": [], "prod": []},
+    )
+    @patch(
+        "pages.dimension_loader_service.load_service_config",
+        return_value=(None, "No dimensions loader config found at /tmp/config.json."),
+    )
+    def test_config_error_is_rendered_only_in_action_panel(self, *_):
+        component = dls.build_dimension_loader_content()
+        self.assertEqual(self._count_text(component, "No dimensions loader config found"), 0)
+        panel = dls._build_action_panel("dev")  # noqa: SLF001
+        self.assertEqual(self._count_text(panel, "No dimensions loader config found"), 1)
+
+    @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
+    @patch(
+        "pages.dimension_loader_service.get_dimension_jobs_by_environment",
+        return_value={
+            "dev": [
+                {
+                    "name": "[DEV] Core Dimensions",
+                    "target_root": "Files/dimensions/core",
+                    "workspace_display_name": "dev-ocean",
+                    "lakehouse_display_name": "Source_Data",
+                    "source_links": ["https://example.test"],
+                    "mappings": [{"source_relative_path": "a.xlsx"}],
+                }
+            ],
+            "prod": [],
+        },
+    )
+    @patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None))
+    def test_refresh_action_builds_summary(self, *_):
+        status, results = dls._build_dimension_loader_action_result("dimension-loader-refresh", "dev")  # noqa: SLF001
+        self.assertEqual(status, "Refreshed 1 job(s) for DEV from the Dimensions Loader config.")
+        self.assertEqual(self._count_text(results, "[DEV] Core Dimensions"), 1)
+        self.assertEqual(self._count_text(results, "SharePoint links: 1 | Mappings: 1"), 1)
+
+    @patch("services.fabric_uploader_cli.app._upload_mapping")
+    @patch("services.fabric_uploader_cli.app._resolve_fabric_destination", return_value=("ws-1", "lh-1"))
+    @patch("services.fabric_uploader_cli.app._online_auth")
+    @patch("pages.dimension_loader_service.threading.Thread")
+    @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
+    @patch(
+        "pages.dimension_loader_service.get_dimension_jobs",
+        return_value=[
+            {
+                "name": "[DEV] Core Dimensions",
+                "enabled": True,
+                "source_kind": "sharepoint",
+                "target_root": "Files/dimensions/core",
+                "fabric": {
+                    "workspace_display_name": "dev-ocean",
+                    "lakehouse_display_name": "Source_Data",
+                },
+                "source_links": ["https://example.test"],
+                "mappings": [{"source_relative_path": "a.xlsx", "target_relative_path": "a.xlsx"}],
+            }
+        ],
+    )
+    @patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None))
+    def test_sync_action_uses_uploader_helpers(
+        self,
+        load_service_config,
+        get_dimension_jobs,
+        get_missing_env_vars,
+        mock_thread,
+        get_online_auth,
+        resolve_destination,
+        upload_mapping,
+    ):
+        auth = type(
+            "Auth",
+            (),
+            {
+                "SHAREPOINT_SCOPE": "sp-scope",
+                "FABRIC_SCOPE": "fabric-scope",
+                "_ensure_authenticated": lambda self, scope: None,
+            },
+        )()
+        get_online_auth.return_value = auth
+        upload_mapping.side_effect = lambda *args, **kwargs: (
+            kwargs["progress_callback"](
+                "Downloading a.xlsx [########] 100.00% 1.0 KB/1.0 KB remaining 0 B ETA 00:00 1.0 KB/s"
+            )
+            if kwargs.get("progress_callback")
+            else None
+        ) or {
+            "source_relative_path": "a.xlsx",
+            "effective_target_path": "a.xlsx",
+            "byte_count": 1024,
+        }
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                self.target = target
+                self.args = args
+                self.kwargs = kwargs or {}
+
+            def start(self):
+                if self.target:
+                    self.target(*self.args, **self.kwargs)
+
+        mock_thread.side_effect = _FakeThread
+
+        status, current_transfer, results, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
+        self.assertIn("Sync started for DEV", status)
+        self.assertIn("Processed 0/1 mapping(s). 1 remaining.", current_transfer)
+        self.assertFalse(disabled)
+        self.assertTrue(str(state["run_id"]))
+        self.assertIsNotNone(dls._get_sync_state(str(state["run_id"])))  # noqa: SLF001
+        rendered_status, rendered_current_transfer, rendered_results = dls._build_sync_results(state)  # noqa: SLF001
+        with patch(
+            "pages.dimension_loader_service.get_dimension_jobs_by_environment",
+            return_value={
+                "dev": [
+                    {
+                        "name": "[DEV] Core Dimensions",
+                        "target_root": "Files/dimensions/core",
+                        "workspace_display_name": "dev-ocean",
+                        "lakehouse_display_name": "Source_Data",
+                        "source_links": ["https://example.test"],
+                        "mappings": [{"source_relative_path": "a.xlsx", "target_relative_path": "a.xlsx"}],
+                    }
+                ],
+                "prod": [],
+            },
+        ), patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None)):
+            rendered_board = dls._build_progress_board(state)  # noqa: SLF001
+        self.assertIn("Sync complete for DEV", rendered_status)
+        self.assertIn("Processed 1/1 mapping(s). 0 remaining.", rendered_current_transfer)
+        self.assertIn("Current file: a.xlsx", rendered_current_transfer)
+        self.assertEqual(self._count_text(rendered_results, "Successful mappings"), 1)
+        self.assertEqual(self._count_text(rendered_results, "Current file: a.xlsx"), 1)
+        self.assertGreaterEqual(self._count_text(rendered_board, "1/1"), 1)
+        upload_mapping.assert_called_once()
 
 
 if __name__ == "__main__":

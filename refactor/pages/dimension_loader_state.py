@@ -18,6 +18,7 @@ def get_missing_env_vars(env: Mapping[str, str] | None = None) -> list[str]:
 
 
 def load_service_config(config_path: Path = CONFIG_PATH) -> tuple[dict[str, Any] | None, str | None]:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
         return None, (
             f"No dimensions loader config found at {config_path}. "
@@ -55,11 +56,8 @@ def _is_dimension_job(job: dict[str, Any]) -> bool:
 
 
 def get_dimension_jobs_by_environment(config: dict[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
-    jobs = list((config or {}).get("jobs", []) or [])
     grouped: dict[str, list[dict[str, Any]]] = {"dev": [], "prod": []}
-    for index, job in enumerate(jobs, start=1):
-        if not isinstance(job, dict) or not _is_dimension_job(job):
-            continue
+    for index, job in enumerate(get_dimension_jobs(config), start=1):
         environment = _job_environment(job)
         if not environment:
             continue
@@ -78,6 +76,19 @@ def get_dimension_jobs_by_environment(config: dict[str, Any] | None) -> dict[str
             }
         )
     return grouped
+
+
+def get_dimension_jobs(config: dict[str, Any] | None, environment: str | None = None) -> list[dict[str, Any]]:
+    jobs = list((config or {}).get("jobs", []) or [])
+    selected_env = environment if environment in {"dev", "prod"} else None
+    selected_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        if not isinstance(job, dict) or not _is_dimension_job(job):
+            continue
+        if selected_env and _job_environment(job) != selected_env:
+            continue
+        selected_jobs.append(job)
+    return selected_jobs
 
 
 def build_config_missing_message(config_error: str | None) -> list[str]:
