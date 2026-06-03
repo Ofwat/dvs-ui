@@ -21,6 +21,16 @@ class ServicesCatalogTests(unittest.TestCase):
         self.assertEqual(page["label"], "Dimension Loader")
         self.assertEqual(page["path"], "/services/dimension-loader")
 
+    def test_interim_solution_route_exists(self):
+        page = get_page_by_path("/services/interim-solution")
+        self.assertEqual(page["label"], "Interim Solution")
+        self.assertEqual(page["path"], "/services/interim-solution")
+
+    def test_interim_solution_route_exists(self):
+        page = get_page_by_path("/services/interim-solution")
+        self.assertEqual(page["label"], "Interim Solution")
+        self.assertEqual(page["path"], "/services/interim-solution")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,10 @@ from .dimension_loader_service import (
     DIMENSION_LOADER_SERVICE,
     build_dimension_loader_content,
 )
+from .interim_solution_service import (
+    INTERIM_SOLUTION_SERVICE,
+    build_interim_solution_content,
+)
 from .data_validation_service import (
     SERVICE_DETAIL_PAGES,
     build_mode_detail,
@@ -45,6 +49,15 @@ _DETAIL_PAGE_DEFINITIONS.append(
         "label": DIMENSION_LOADER_SERVICE["label"],
         "path": DIMENSION_LOADER_SERVICE["path"],
         "content": build_dimension_loader_content,
+        "nav": False,
+        "nav_class": "govuk-service-navigation app-service-navigation",
+    }
+)
+_DETAIL_PAGE_DEFINITIONS.append(
+    {
+        "label": INTERIM_SOLUTION_SERVICE["label"],
+        "path": INTERIM_SOLUTION_SERVICE["path"],
+        "content": build_interim_solution_content,
         "nav": False,
         "nav_class": "govuk-service-navigation app-service-navigation",
     }

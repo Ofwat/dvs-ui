@@ -1,6 +1,7 @@
 from dash import dcc, html
 
 from .dimension_loader_service import DIMENSION_LOADER_SERVICE
+from .interim_solution_service import INTERIM_SOLUTION_SERVICE
 from .data_validation_service import SERVICE_DETAIL_PAGES
 
 
@@ -42,6 +43,18 @@ def build_services_content():
                     dcc.Link(
                         "View service details",
                         href=DIMENSION_LOADER_SERVICE["path"],
+                        className="govuk-link",
+                    ),
+                ],
+            ),
+            html.Div(
+                className="govuk-grid-column-full govuk-!-margin-bottom-5",
+                children=[
+                    html.H3(INTERIM_SOLUTION_SERVICE["label"], className="govuk-heading-m"),
+                    html.P(INTERIM_SOLUTION_SERVICE["summary"], className="govuk-body"),
+                    dcc.Link(
+                        "View service details",
+                        href=INTERIM_SOLUTION_SERVICE["path"],
                         className="govuk-link",
                     ),
                 ],
