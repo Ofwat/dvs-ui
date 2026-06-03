@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -124,21 +124,6 @@ class DimensionLoaderStateTests(unittest.TestCase):
     @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
     @patch(
         "pages.dimension_loader_service.get_dimension_jobs_by_environment",
-        return_value={"dev": [], "prod": []},
-    )
-    @patch(
-        "pages.dimension_loader_service.load_service_config",
-        return_value=(None, "No dimensions loader config found at /tmp/config.json."),
-    )
-    def test_config_error_is_rendered_only_in_action_panel(self, *_):
-        component = dls.build_dimension_loader_content()
-        self.assertEqual(self._count_text(component, "No dimensions loader config found"), 0)
-        panel = dls._build_action_panel("dev")  # noqa: SLF001
-        self.assertEqual(self._count_text(panel, "No dimensions loader config found"), 1)
-
-    @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
-    @patch(
-        "pages.dimension_loader_service.get_dimension_jobs_by_environment",
         return_value={
             "dev": [
                 {
@@ -154,17 +139,25 @@ class DimensionLoaderStateTests(unittest.TestCase):
         },
     )
     @patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None))
-    def test_refresh_action_builds_summary(self, *_):
-        status, results = dls._build_dimension_loader_action_result("dimension-loader-refresh", "dev")  # noqa: SLF001
-        self.assertEqual(status, "Refreshed 1 job(s) for DEV from the Dimensions Loader config.")
-        self.assertEqual(self._count_text(results, "[DEV] Core Dimensions"), 1)
-        self.assertEqual(self._count_text(results, "SharePoint links: 1 | Mappings: 1"), 1)
+    def test_action_helpers_render_status_text(self, *_):
+        panel = dls._build_action_panel("dev")  # noqa: SLF001
+        self.assertEqual(self._count_text(panel, "Refresh files"), 1)
+        self.assertEqual(self._count_text(panel, "List files"), 1)
+        self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
+
+        refresh_status = dls._build_dimension_loader_action_result("dimension-loader-refresh", "dev")  # noqa: SLF001
+        list_status = dls._build_dimension_loader_action_result("dimension-loader-list", "dev")  # noqa: SLF001
+        self.assertEqual(refresh_status, "Refreshed 1 job(s) for DEV from the Dimensions Loader config.")
+        self.assertIn("[DEV] Core Dimensions", list_status)
+
+    def test_build_progress_text(self):
+        self.assertEqual(dls._build_progress_text({"processed_mappings": 3, "total_mappings": 8}), "3/8")  # noqa: SLF001
+        self.assertEqual(dls._build_progress_text(None), "")  # noqa: SLF001
 
     @patch("services.fabric_uploader_cli.app._upload_mapping")
     @patch("services.fabric_uploader_cli.app._resolve_fabric_destination", return_value=("ws-1", "lh-1"))
     @patch("services.fabric_uploader_cli.app._online_auth")
     @patch("pages.dimension_loader_service.threading.Thread")
-    @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
     @patch(
         "pages.dimension_loader_service.get_dimension_jobs",
         return_value=[
@@ -182,12 +175,13 @@ class DimensionLoaderStateTests(unittest.TestCase):
             }
         ],
     )
+    @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
     @patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None))
-    def test_sync_action_uses_uploader_helpers(
+    def test_sync_action_runs_uploader_helpers(
         self,
         load_service_config,
-        get_dimension_jobs,
         get_missing_env_vars,
+        get_dimension_jobs,
         mock_thread,
         get_online_auth,
         resolve_destination,
@@ -203,13 +197,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
             },
         )()
         get_online_auth.return_value = auth
-        upload_mapping.side_effect = lambda *args, **kwargs: (
-            kwargs["progress_callback"](
-                "Downloading a.xlsx [########] 100.00% 1.0 KB/1.0 KB remaining 0 B ETA 00:00 1.0 KB/s"
-            )
-            if kwargs.get("progress_callback")
-            else None
-        ) or {
+        upload_mapping.return_value = {
             "source_relative_path": "a.xlsx",
             "effective_target_path": "a.xlsx",
             "byte_count": 1024,
@@ -227,36 +215,12 @@ class DimensionLoaderStateTests(unittest.TestCase):
 
         mock_thread.side_effect = _FakeThread
 
-        status, current_transfer, results, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
+        status, progress, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
         self.assertIn("Sync started for DEV", status)
-        self.assertIn("Processed 0/1 mapping(s). 1 remaining.", current_transfer)
+        self.assertEqual(progress, "0/1")
         self.assertFalse(disabled)
         self.assertTrue(str(state["run_id"]))
-        self.assertIsNotNone(dls._get_sync_state(str(state["run_id"])))  # noqa: SLF001
-        rendered_status, rendered_current_transfer, rendered_results = dls._build_sync_results(state)  # noqa: SLF001
-        with patch(
-            "pages.dimension_loader_service.get_dimension_jobs_by_environment",
-            return_value={
-                "dev": [
-                    {
-                        "name": "[DEV] Core Dimensions",
-                        "target_root": "Files/dimensions/core",
-                        "workspace_display_name": "dev-ocean",
-                        "lakehouse_display_name": "Source_Data",
-                        "source_links": ["https://example.test"],
-                        "mappings": [{"source_relative_path": "a.xlsx", "target_relative_path": "a.xlsx"}],
-                    }
-                ],
-                "prod": [],
-            },
-        ), patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None)):
-            rendered_board = dls._build_progress_board(state)  # noqa: SLF001
-        self.assertIn("Sync complete for DEV", rendered_status)
-        self.assertIn("Processed 1/1 mapping(s). 0 remaining.", rendered_current_transfer)
-        self.assertIn("Current file: a.xlsx", rendered_current_transfer)
-        self.assertEqual(self._count_text(rendered_results, "Successful mappings"), 1)
-        self.assertEqual(self._count_text(rendered_results, "Current file: a.xlsx"), 1)
-        self.assertGreaterEqual(self._count_text(rendered_board, "1/1"), 1)
+        self.assertEqual(dls._build_progress_text(dls._get_sync_state(str(state["run_id"]))), "1/1")  # noqa: SLF001
         upload_mapping.assert_called_once()
 
 
