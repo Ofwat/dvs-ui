@@ -60,6 +60,11 @@ def _create_sync_state(environment: str | None, total_files: int = 0) -> dict[st
         "current_job": "",
         "current_file": "",
         "current_transfer": "",
+        "pipeline_workspace_id": "",
+        "pipeline_id": "",
+        "pipeline_run_id": "",
+        "pipeline_status": "",
+        "pipeline_event": "",
         "processed_files": 0,
         "total_files": total_files,
         "error": None,
@@ -127,6 +132,119 @@ def _build_transfer_text(state: dict[str, object] | None) -> str:
     return "Waiting for transfer progress..."
 
 
+def _build_pipeline_link(state: dict[str, object] | None) -> str:
+    if not state:
+        return ""
+    workspace_id = str(state.get("pipeline_workspace_id", "")).strip()
+    pipeline_id = str(state.get("pipeline_id", "")).strip()
+    pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
+    if not workspace_id or not pipeline_id or not pipeline_run_id:
+        return ""
+    return (
+        "https://app.powerbi.com/workloads/data-pipeline/monitoring/"
+        f"workspaces/{workspace_id}/pipelines/{pipeline_id}/{pipeline_run_id}?experience=power-bi"
+    )
+
+
+def _build_pipeline_status_text(state: dict[str, object] | None) -> str:
+    if not state:
+        return ""
+    pipeline_status = str(state.get("pipeline_status", "")).strip()
+    if pipeline_status:
+        return pipeline_status
+    pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
+    if pipeline_run_id:
+        return "Pipeline: queued"
+    return ""
+
+
+def _build_pipeline_event_text(state: dict[str, object] | None) -> str:
+    if not state:
+        return ""
+    pipeline_event = str(state.get("pipeline_event", "")).strip()
+    if pipeline_event:
+        return pipeline_event
+    return ""
+
+
+def _build_pipeline_link_component(state: dict[str, object] | None):
+    workspace_id = str(state.get("pipeline_workspace_id", "")).strip() if state else ""
+    pipeline_id = str(state.get("pipeline_id", "")).strip() if state else ""
+    pipeline_run_id = str(state.get("pipeline_run_id", "")).strip() if state else ""
+    if not workspace_id or not pipeline_id:
+        return ""
+    pipeline_page = f"https://app.fabric.microsoft.com/groups/{workspace_id}/pipelines/{pipeline_id}"
+    monitor_page = _build_pipeline_link(state)
+    children: list[object] = [html.A("Open Fabric pipeline", href=pipeline_page, target="_blank", rel="noopener noreferrer")]
+    if monitor_page:
+        children.append(html.Span(" ", className="govuk-!-margin-left-1"))
+        children.append(html.A("Open Fabric monitor", href=monitor_page, target="_blank", rel="noopener noreferrer"))
+    if not pipeline_run_id:
+        children.append(html.Span("Pipeline run id is not available yet.", className="govuk-hint"))
+    return html.Div(children=children)
+
+
+def _pipeline_is_active(status_text: str) -> bool:
+    return status_text.strip().lower() in {"notstarted", "queued", "inprogress", "running"}
+
+
+def _refresh_pipeline_status(state: dict[str, object]) -> dict[str, object]:
+    pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
+    pipeline_workspace_id = str(state.get("pipeline_workspace_id", "")).strip()
+    pipeline_id = str(state.get("pipeline_id", "")).strip()
+    if not pipeline_run_id or not pipeline_workspace_id or not pipeline_id:
+        return state
+
+    from services.fabric_uploader_cli import app as uploader
+
+    auth = uploader._online_auth()
+    success, payload = auth.get_fabric_pipeline_run(pipeline_workspace_id, pipeline_id, pipeline_run_id)
+    if not success:
+        state["pipeline_status"] = f"Pipeline: unable to load status"
+        return state
+    if not isinstance(payload, dict):
+        state["pipeline_status"] = "Pipeline: status unavailable"
+        return state
+    status_text = _extract_pipeline_status(payload)
+    if status_text:
+        state["pipeline_status"] = f"Pipeline: {status_text}"
+    return state
+
+
+def _resolve_latest_pipeline_run_id(auth, workspace_id: str, pipeline_id: str) -> str:
+    success, payload = auth.list_fabric_pipeline_runs(workspace_id, pipeline_id)
+    if not success or not isinstance(payload, list) or not payload:
+        return ""
+    latest = payload[0]
+    candidate = (
+        latest.get("id")
+        or latest.get("jobInstanceId")
+        or latest.get("jobId")
+        or latest.get("runId")
+        or ""
+    )
+    run_id = str(candidate).strip()
+    return "" if run_id.lower() == "none" else run_id
+
+
+def _extract_pipeline_status(payload: dict[str, object] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    raw_status = (
+        payload.get("status")
+        or payload.get("state")
+        or payload.get("runStatus")
+        or payload.get("jobStatus")
+        or ""
+    )
+    status = str(raw_status).strip()
+    if status:
+        return status
+    if payload.get("error"):
+        return f"Failed: {payload.get('error')}"
+    return ""
+
+
 def build_interim_solution_content():
     return html.Div(
         className="govuk-grid-row govuk-!-margin-bottom-6",
@@ -172,6 +290,18 @@ def build_interim_solution_content():
                     html.Div(
                         id="interim-solution-transfer",
                         className="govuk-!-margin-top-1 govuk-body govuk-!-font-family-monospace",
+                    ),
+                    html.Div(
+                        id="interim-solution-pipeline-status",
+                        className="govuk-!-margin-top-1 govuk-body govuk-!-font-weight-bold",
+                    ),
+                    html.Div(
+                        id="interim-solution-pipeline-event",
+                        className="govuk-!-margin-top-1 govuk-body govuk-!-font-family-monospace",
+                    ),
+                    html.Div(
+                        id="interim-solution-pipeline-link",
+                        className="govuk-!-margin-top-1 govuk-body",
                     ),
                     html.Div(
                         id="interim-solution-results",
@@ -386,6 +516,11 @@ def _trigger_configured_pipeline(uploader, job: dict[str, object]) -> str | None
     pipeline_run_id = str(raw_run_id).strip() if raw_run_id is not None else ""
     if pipeline_run_id.lower() == "none":
         pipeline_run_id = ""
+    if not pipeline_run_id:
+        pipeline_run_id = _resolve_latest_pipeline_run_id(auth, pipeline_workspace_id, pipeline_id)
+    job["_pipeline_workspace_id"] = pipeline_workspace_id
+    job["_pipeline_id"] = pipeline_id
+    job["_pipeline_run_id"] = pipeline_run_id
     return pipeline_run_id or None
 
 
@@ -516,10 +651,13 @@ def _interim_sync_worker(
                 run_id,
                 current_job=job_name,
                 current_transfer="",
+                pipeline_event=f"Triggering pipeline for job={job_name}",
                 status=f"Triggering pipeline for {job_name}",
             )
             try:
                 pipeline_run_id = _trigger_configured_pipeline(uploader, job)
+                pipeline_workspace_id = str(job.get("_pipeline_workspace_id", "")).strip()
+                pipeline_id = str(job.get("_pipeline_id", "")).strip()
                 _debug(
                     f"Triggered pipeline for job={job_name}"
                     + (f" run_id={pipeline_run_id}" if pipeline_run_id else "")
@@ -528,6 +666,12 @@ def _interim_sync_worker(
                     run_id,
                     current_job=job_name,
                     current_transfer="",
+                    pipeline_workspace_id=pipeline_workspace_id,
+                    pipeline_id=pipeline_id,
+                    pipeline_run_id=pipeline_run_id or "",
+                    pipeline_status="Pipeline: queued" if pipeline_run_id else "",
+                    pipeline_event=f"Triggered pipeline for job={job_name}"
+                    + (f" run_id={pipeline_run_id}" if pipeline_run_id else ""),
                     status=(
                         f"Triggered pipeline for {job_name}"
                         + (f" run_id={pipeline_run_id}" if pipeline_run_id else "")
@@ -540,6 +684,11 @@ def _interim_sync_worker(
                     run_id,
                     current_job=job_name,
                     current_transfer="",
+                    pipeline_status="",
+                    pipeline_event=f"Pipeline trigger failed for job={job_name}: {exc}",
+                    pipeline_run_id="",
+                    pipeline_workspace_id="",
+                    pipeline_id="",
                     status=f"Pipeline trigger failed for {job_name}: {exc}",
                 )
 
@@ -550,6 +699,8 @@ def _interim_sync_worker(
             current_job=last_job_name,
             current_file=last_file_name,
             current_transfer="",
+            pipeline_status=str(_get_sync_state(run_id).get("pipeline_status", "")) if _get_sync_state(run_id) else "",
+            pipeline_event=str(_get_sync_state(run_id).get("pipeline_event", "")) if _get_sync_state(run_id) else "",
             current_job_folder=run_folder_name,
             processed_files=processed_files,
             total_files=total_files,
@@ -614,6 +765,9 @@ def _start_sync_run(uploader, config: dict[str, object], selected_env: str, jobs
         "0/{}".format(total_files) if total_files else "0/0",
         _build_progress_detail(state),
         _build_transfer_text(state),
+        _build_pipeline_status_text(state),
+        _build_pipeline_event_text(state),
+        "",
         state,
         False,
     )
@@ -624,7 +778,7 @@ def _sync_dimension_jobs(environment: str | None):
     selected_env = environment if environment in {"dev", "prod"} else "dev"
     _debug(f"Sync requested env={selected_env}")
     if config_error:
-        return config_error, "", "", "", {"environment": selected_env, "running": False, "done": True}, True
+        return config_error, "", "", "", "", "", "", {"environment": selected_env, "running": False, "done": True}, True
 
     missing_env_vars = get_missing_env_vars()
     if missing_env_vars:
@@ -633,7 +787,7 @@ def _sync_dimension_jobs(environment: str | None):
             + ", ".join(missing_env_vars)
             + "."
         )
-        return message, "", "", "", {"environment": selected_env, "running": False, "done": True}, True
+        return message, "", "", "", "", "", "", {"environment": selected_env, "running": False, "done": True}, True
 
     jobs = [
         job
@@ -645,6 +799,9 @@ def _sync_dimension_jobs(environment: str | None):
             f"No enabled SharePoint folder jobs found for {selected_env.upper()}.",
             "0/0",
             f"{selected_env.upper()} | Waiting to start",
+            "",
+            "",
+            "",
             "",
             {"environment": selected_env, "running": False, "done": True, "processed_files": 0, "total_files": 0},
             True,
@@ -668,6 +825,9 @@ def register_interim_solution_callbacks(app):
         Output("interim-solution-progress", "children"),
         Output("interim-solution-progress-detail", "children"),
         Output("interim-solution-transfer", "children"),
+        Output("interim-solution-pipeline-status", "children"),
+        Output("interim-solution-pipeline-event", "children"),
+        Output("interim-solution-pipeline-link", "children"),
         Output("interim-solution-results", "children"),
         Output("interim-solution-sync-state", "data"),
         Output("interim-solution-sync-poll", "disabled"),
@@ -686,13 +846,13 @@ def register_interim_solution_callbacks(app):
         _debug(f"Callback action trigger={component_id} environment={environment}")
         if component_id == "interim-solution-refresh":
             status = _build_action_result(component_id, environment)
-            return status, "", "", "", no_update, None, True
+            return status, "", "", "", "", "", "", no_update, None, True
         if component_id == "interim-solution-list":
             status = _build_action_result(component_id, environment)
-            return status, "", "", "", _build_list_results(environment), None, True
+            return status, "", "", "", "", "", "", _build_list_results(environment), None, True
         if component_id == "interim-solution-sync":
-            status, progress, detail, transfer, state, disabled = _sync_dimension_jobs(environment)
-            return status, progress, detail, transfer, no_update, state, disabled
+            status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, state, disabled = _sync_dimension_jobs(environment)
+            return status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, no_update, state, disabled
         if component_id == "interim-solution-environment":
             raise PreventUpdate
         raise PreventUpdate
@@ -701,6 +861,9 @@ def register_interim_solution_callbacks(app):
         Output("interim-solution-progress", "children", allow_duplicate=True),
         Output("interim-solution-progress-detail", "children", allow_duplicate=True),
         Output("interim-solution-transfer", "children", allow_duplicate=True),
+        Output("interim-solution-pipeline-status", "children", allow_duplicate=True),
+        Output("interim-solution-pipeline-event", "children", allow_duplicate=True),
+        Output("interim-solution-pipeline-link", "children", allow_duplicate=True),
         Output("interim-solution-status", "children", allow_duplicate=True),
         Output("interim-solution-sync-state", "data", allow_duplicate=True),
         Output("interim-solution-sync-poll", "disabled", allow_duplicate=True),
@@ -712,9 +875,17 @@ def register_interim_solution_callbacks(app):
         state = _get_sync_state(str((sync_state or {}).get("run_id", "")))
         if not state:
             raise PreventUpdate
+        if str(state.get("pipeline_run_id", "")).strip():
+            state = _refresh_pipeline_status(state)
+            run_id = str(state.get("run_id", ""))
+            _set_sync_state(run_id, **{key: value for key, value in state.items() if key != "run_id"})
         progress = _build_progress_text(state)
         detail = _build_progress_detail(state)
         transfer = _build_transfer_text(state)
+        pipeline_status = _build_pipeline_status_text(state)
+        pipeline_event = _build_pipeline_event_text(state)
+        pipeline_link_url = _build_pipeline_link(state)
+        pipeline_link = _build_pipeline_link_component(state)
         status = str(state.get("status", "")).strip()
-        disabled = not bool(state.get("running", False))
-        return progress, detail, transfer, status, state, disabled
+        disabled = not bool(state.get("running", False)) and not _pipeline_is_active(pipeline_status)
+        return progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, status, state, disabled

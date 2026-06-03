@@ -189,13 +189,13 @@ class InterimSolutionStateTests(unittest.TestCase):
             return_value=(
                 True,
                 {
-                    "id": "pipeline-run-1",
                     "workspace_id": "workspace-pipeline",
                     "pipeline_id": "pipeline-1",
                     "parameters": {"mode": "dev"},
                 },
             )
         )
+        auth.list_fabric_pipeline_runs = Mock(return_value=(True, [{"id": "pipeline-run-1", "status": "Queued"}]))
         iss._SYNC_RUNS.clear()  # noqa: SLF001
         with patch("pages.interim_solution_service.threading.Thread") as mock_thread:
             class _FakeThread:
@@ -211,21 +211,28 @@ class InterimSolutionStateTests(unittest.TestCase):
             mock_thread.side_effect = _FakeThread
             with patch("pages.interim_solution_service._build_run_folder_name", return_value="20260603T120000Z_abcd1234"):
                 with patch("services.fabric_uploader_cli.app._online_auth", return_value=auth):
-                    status, progress, detail, transfer, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
+                    status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
 
         self.assertIn("Sync started for DEV", status)
         self.assertEqual(progress, "0/1")
         self.assertIn("DEV", detail)
         self.assertIn("20260603T120000Z_abcd1234", detail)
         self.assertIn("Waiting for transfer progress", transfer)
+        self.assertEqual(pipeline_status, "")
+        self.assertEqual(pipeline_event, "")
+        self.assertEqual(pipeline_link, "")
         self.assertFalse(disabled)
         live_state = iss._get_sync_state(str(state["run_id"]))  # noqa: SLF001
         self.assertEqual(iss._build_progress_text(live_state), "1/1")  # noqa: SLF001
         self.assertIn("file1.xlsx", iss._build_progress_detail(live_state))  # noqa: SLF001
         self.assertIn("20260603T120000Z_abcd1234", iss._build_progress_detail(live_state))  # noqa: SLF001
+        self.assertIn("Pipeline: queued", iss._build_pipeline_status_text(live_state))  # noqa: SLF001
+        self.assertIn("Triggered pipeline for job=[DEV] Dummy Models", iss._build_pipeline_event_text(live_state))  # noqa: SLF001
+        self.assertIn("app.powerbi.com/workloads/data-pipeline/monitoring", iss._build_pipeline_link(live_state))  # noqa: SLF001
         upload_bytes_with_progress.assert_called_once()
         auth.list_fabric_workspaces.assert_called_once()
         auth.list_fabric_pipelines.assert_called_once_with("workspace-pipeline")
+        auth.list_fabric_pipeline_runs.assert_called_once_with("workspace-pipeline", "pipeline-1")
         auth.trigger_fabric_pipeline.assert_called_once_with(
             "workspace-pipeline",
             "pipeline-1",
