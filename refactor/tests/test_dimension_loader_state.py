@@ -76,7 +76,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
                         "workspace_display_name": "dev-ocean",
                         "lakehouse_display_name": "Source_Data",
                     },
-                    "source_links": ["https://example.test"],
+                    "source_links": ["https://example.test/folder"],
                     "mappings": [],
                 },
                 {
@@ -88,7 +88,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
                         "workspace_display_name": "prod-ocean",
                         "lakehouse_display_name": "Source_Data",
                     },
-                    "source_links": ["https://example.test"],
+                    "source_links": ["https://example.test/folder"],
                     "mappings": [],
                 },
                 {
@@ -123,6 +123,10 @@ class DimensionLoaderStateTests(unittest.TestCase):
 
     @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
     @patch(
+        "pages.dimension_loader_service._scan_job_files",
+        return_value=[{"source_relative_path": "a.xlsx", "target_relative_path": "Files/dimensions/core/a.xlsx"}],
+    )
+    @patch(
         "pages.dimension_loader_service.get_dimension_jobs_by_environment",
         return_value={
             "dev": [
@@ -132,7 +136,6 @@ class DimensionLoaderStateTests(unittest.TestCase):
                     "workspace_display_name": "dev-ocean",
                     "lakehouse_display_name": "Source_Data",
                     "source_links": ["https://example.test"],
-                    "mappings": [{"source_relative_path": "a.xlsx"}],
                 }
             ],
             "prod": [],
@@ -144,11 +147,15 @@ class DimensionLoaderStateTests(unittest.TestCase):
         self.assertEqual(self._count_text(panel, "Refresh files"), 1)
         self.assertEqual(self._count_text(panel, "List files"), 1)
         self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
+        self.assertEqual(self._count_text(panel, "Open SharePoint folder"), 1)
 
         refresh_status = dls._build_dimension_loader_action_result("dimension-loader-refresh", "dev")  # noqa: SLF001
         list_status = dls._build_dimension_loader_action_result("dimension-loader-list", "dev")  # noqa: SLF001
         self.assertEqual(refresh_status, "Refreshed 1 job(s) for DEV from the Dimensions Loader config.")
-        self.assertIn("[DEV] Core Dimensions", list_status)
+        self.assertEqual(list_status, "DEV folder scan ready.")
+
+        list_results = dls._build_list_results("dev")  # noqa: SLF001
+        self.assertEqual(self._count_text(list_results, "a.xlsx -> Files/dimensions/core/a.xlsx"), 1)
 
     def test_build_progress_text(self):
         self.assertEqual(dls._build_progress_text({"processed_mappings": 3, "total_mappings": 8}), "3/8")  # noqa: SLF001
@@ -169,6 +176,32 @@ class DimensionLoaderStateTests(unittest.TestCase):
     @patch("services.fabric_uploader_cli.app._online_auth")
     @patch("pages.dimension_loader_service.threading.Thread")
     @patch(
+        "pages.dimension_loader_service._prepare_scanned_jobs",
+        return_value=(
+            [
+                {
+                    "name": "[DEV] Core Dimensions",
+                    "enabled": True,
+                    "source_kind": "sharepoint",
+                    "target_root": "Files/dimensions/core",
+                    "source_links": ["https://example.test/folder"],
+                    "fabric": {
+                        "workspace_display_name": "dev-ocean",
+                        "lakehouse_display_name": "Source_Data",
+                    },
+                    "_scanned_files": [
+                        {
+                            "source_link": "https://example.test/folder",
+                            "source_relative_path": "a.xlsx",
+                            "target_relative_path": "a.xlsx",
+                        }
+                    ],
+                }
+            ],
+            1,
+        ),
+    )
+    @patch(
         "pages.dimension_loader_service.get_dimension_jobs",
         return_value=[
             {
@@ -180,8 +213,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
                     "workspace_display_name": "dev-ocean",
                     "lakehouse_display_name": "Source_Data",
                 },
-                "source_links": ["https://example.test"],
-                "mappings": [{"source_relative_path": "a.xlsx", "target_relative_path": "a.xlsx"}],
+                    "source_links": ["https://example.test/folder"],
             }
         ],
     )
@@ -192,6 +224,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
         load_service_config,
         get_missing_env_vars,
         get_dimension_jobs,
+        prepare_scanned_jobs,
         mock_thread,
         get_online_auth,
         resolve_destination,
@@ -238,6 +271,8 @@ class DimensionLoaderStateTests(unittest.TestCase):
             "DEV | [DEV] Core Dimensions | a.xlsx",
         )
         upload_mapping.assert_called_once()
+        self.assertEqual(upload_mapping.call_args.args[1]["source_relative_path"], "a.xlsx")
+        self.assertEqual(upload_mapping.call_args.args[1]["source_link"], "https://example.test/folder")
 
 
 if __name__ == "__main__":
