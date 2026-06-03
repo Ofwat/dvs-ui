@@ -42,6 +42,7 @@ def _create_sync_state(environment: str | None, total_mappings: int = 0) -> dict
         "running": False,
         "done": False,
         "status": "",
+        "current_job": "",
         "processed_mappings": 0,
         "total_mappings": total_mappings,
         "error": None,
@@ -73,6 +74,19 @@ def _build_progress_text(state: dict[str, object] | None) -> str:
     if total <= 0:
         return "0/0"
     return f"{processed}/{total}"
+
+
+def _build_progress_detail(state: dict[str, object] | None) -> str:
+    if not state:
+        return ""
+    environment = str(state.get("environment", "dev")).upper()
+    current_job = str(state.get("current_job", "")).strip()
+    status = str(state.get("status", "")).strip()
+    if current_job:
+        return f"{environment} | {current_job}"
+    if status:
+        return f"{environment} | {status}"
+    return f"{environment} | Waiting to start"
 
 
 def build_dimension_loader_content():
@@ -112,6 +126,10 @@ def build_dimension_loader_content():
                     html.Div(
                         id="dimension-loader-progress",
                         className="govuk-!-margin-top-4 govuk-body govuk-!-font-weight-bold",
+                    ),
+                    html.Div(
+                        id="dimension-loader-progress-detail",
+                        className="govuk-!-margin-top-1 govuk-body",
                     ),
                     html.Div(id="dimension-loader-status", className="govuk-!-margin-top-2 govuk-body"),
                     dcc.Store(id="dimension-loader-sync-state"),
@@ -244,6 +262,7 @@ def _dimension_loader_sync_worker(
             run_id,
             running=True,
             status=f"Syncing {selected_env.upper()}...",
+            current_job="",
             processed_mappings=0,
             total_mappings=total_mappings,
         )
@@ -254,6 +273,11 @@ def _dimension_loader_sync_worker(
         for job in jobs:
             job_name = str(job.get("name", "")).strip() or "Unnamed job"
             _debug(f"Resolving destination for job={job_name}")
+            _set_sync_state(
+                run_id,
+                current_job=job_name,
+                status=f"Working on {job_name}",
+            )
             try:
                 workspace_id, lakehouse_id = uploader._resolve_fabric_destination(job)
             except Exception as exc:  # pylint:disable=broad-except
@@ -290,6 +314,7 @@ def _dimension_loader_sync_worker(
             run_id,
             running=False,
             done=True,
+            current_job=jobs[-1].get("name", "") if jobs else "",
             processed_mappings=processed_mappings,
             total_mappings=total_mappings,
             status=(
@@ -322,6 +347,7 @@ def _start_sync_run(uploader, config: dict[str, object], selected_env: str, jobs
     return (
         f"Sync started for {selected_env.upper()}.",
         "0/{}".format(total_mappings) if total_mappings else "0/0",
+        _build_progress_detail(state),
         state,
         False,
     )
@@ -332,7 +358,7 @@ def _sync_dimension_jobs(environment: str | None):
     selected_env = environment if environment in {"dev", "prod"} else "dev"
     _debug(f"Sync requested env={selected_env}")
     if config_error:
-        return config_error, "", {"environment": selected_env, "running": False, "done": True}, True
+        return config_error, "", "", {"environment": selected_env, "running": False, "done": True}, True
 
     missing_env_vars = get_missing_env_vars()
     if missing_env_vars:
@@ -341,7 +367,7 @@ def _sync_dimension_jobs(environment: str | None):
             + ", ".join(missing_env_vars)
             + "."
         )
-        return message, "", {"environment": selected_env, "running": False, "done": True}, True
+        return message, "", "", {"environment": selected_env, "running": False, "done": True}, True
 
     jobs = [
         job
@@ -352,6 +378,7 @@ def _sync_dimension_jobs(environment: str | None):
         return (
             f"No enabled SharePoint dimension jobs found for {selected_env.upper()}.",
             "0/0",
+            f"{selected_env.upper()} | Waiting to start",
             {"environment": selected_env, "running": False, "done": True, "processed_mappings": 0, "total_mappings": 0},
             True,
         )
@@ -372,6 +399,7 @@ def register_dimension_loader_callbacks(app):
     @app.callback(
         Output("dimension-loader-status", "children"),
         Output("dimension-loader-progress", "children"),
+        Output("dimension-loader-progress-detail", "children"),
         Output("dimension-loader-sync-state", "data"),
         Output("dimension-loader-sync-poll", "disabled"),
         Input("dimension-loader-refresh", "n_clicks"),
@@ -389,19 +417,21 @@ def register_dimension_loader_callbacks(app):
         _debug(f"Callback action trigger={component_id} environment={environment}")
         if component_id == "dimension-loader-refresh":
             status = _build_dimension_loader_action_result(component_id, environment)
-            return status, "", None, True
+            return status, "", "", None, True
         if component_id == "dimension-loader-list":
             status = _build_dimension_loader_action_result(component_id, environment)
-            return status, "", None, True
+            return status, "", "", None, True
         if component_id == "dimension-loader-sync":
-            status, progress, state, disabled = _sync_dimension_jobs(environment)
-            return status, progress, state, disabled
+            status, progress, detail, state, disabled = _sync_dimension_jobs(environment)
+            detail = _build_progress_detail(state)
+            return status, progress, detail, state, disabled
         if component_id == "dimension-loader-environment":
             raise PreventUpdate
         raise PreventUpdate
 
     @app.callback(
         Output("dimension-loader-progress", "children", allow_duplicate=True),
+        Output("dimension-loader-progress-detail", "children", allow_duplicate=True),
         Output("dimension-loader-status", "children", allow_duplicate=True),
         Output("dimension-loader-sync-state", "data", allow_duplicate=True),
         Output("dimension-loader-sync-poll", "disabled", allow_duplicate=True),
@@ -414,6 +444,7 @@ def register_dimension_loader_callbacks(app):
         if not state:
             raise PreventUpdate
         progress = _build_progress_text(state)
+        detail = _build_progress_detail(state)
         status = str(state.get("status", "")).strip()
         disabled = not bool(state.get("running", False))
-        return progress, status, state, disabled
+        return progress, detail, status, state, disabled

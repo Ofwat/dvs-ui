@@ -153,6 +153,10 @@ class DimensionLoaderStateTests(unittest.TestCase):
     def test_build_progress_text(self):
         self.assertEqual(dls._build_progress_text({"processed_mappings": 3, "total_mappings": 8}), "3/8")  # noqa: SLF001
         self.assertEqual(dls._build_progress_text(None), "")  # noqa: SLF001
+        self.assertEqual(
+            dls._build_progress_detail({"environment": "dev", "current_job": "[DEV] Core Dimensions"}),  # noqa: SLF001
+            "DEV | [DEV] Core Dimensions",
+        )
 
     @patch("services.fabric_uploader_cli.app._upload_mapping")
     @patch("services.fabric_uploader_cli.app._resolve_fabric_destination", return_value=("ws-1", "lh-1"))
@@ -215,9 +219,10 @@ class DimensionLoaderStateTests(unittest.TestCase):
 
         mock_thread.side_effect = _FakeThread
 
-        status, progress, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
+        status, progress, detail, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
         self.assertIn("Sync started for DEV", status)
         self.assertEqual(progress, "0/1")
+        self.assertIn("DEV", detail)
         self.assertFalse(disabled)
         self.assertTrue(str(state["run_id"]))
         self.assertEqual(dls._build_progress_text(dls._get_sync_state(str(state["run_id"]))), "1/1")  # noqa: SLF001
