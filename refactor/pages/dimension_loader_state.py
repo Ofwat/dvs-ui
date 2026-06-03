@@ -91,6 +91,23 @@ def get_dimension_jobs(config: dict[str, Any] | None, environment: str | None = 
     return selected_jobs
 
 
+def get_dimension_pipeline_config(config: dict[str, Any] | None, environment: str | None = None) -> dict[str, Any]:
+    pipelines = (config or {}).get("pipelines", {})
+    if not isinstance(pipelines, dict):
+        return {}
+    selected_env = environment if environment in {"dev", "prod"} else None
+    if not selected_env:
+        return {}
+    pipeline = pipelines.get(selected_env, {})
+    if not isinstance(pipeline, dict):
+        return {}
+    return {
+        "workspace_display_name": str(pipeline.get("workspace_display_name", "")).strip(),
+        "pipeline_display_name": str(pipeline.get("pipeline_display_name", "")).strip(),
+        "parameters": dict(pipeline.get("parameters", {}) or {}),
+    }
+
+
 def build_config_missing_message(config_error: str | None) -> list[str]:
     if not config_error:
         return []

@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REFACTOR_DIR = Path(__file__).resolve().parents[1]
 if str(REFACTOR_DIR) not in sys.path:
@@ -218,7 +218,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
         ],
     )
     @patch("pages.dimension_loader_service.get_missing_env_vars", return_value=[])
-    @patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None))
+    @patch("pages.dimension_loader_service.load_service_config")
     def test_sync_action_runs_uploader_helpers(
         self,
         load_service_config,
@@ -230,15 +230,39 @@ class DimensionLoaderStateTests(unittest.TestCase):
         resolve_destination,
         upload_mapping,
     ):
-        auth = type(
-            "Auth",
-            (),
+        load_service_config.return_value = (
             {
-                "SHAREPOINT_SCOPE": "sp-scope",
-                "FABRIC_SCOPE": "fabric-scope",
-                "_ensure_authenticated": lambda self, scope: None,
+                "jobs": [],
+                "pipelines": {
+                    "dev": {
+                        "workspace_display_name": "dev-ocean",
+                        "pipeline_display_name": "Refresh Dimensions",
+                        "parameters": {"mode": "dev"},
+                    }
+                },
             },
-        )()
+            None,
+        )
+        auth = Mock()
+        auth.SHAREPOINT_SCOPE = "sp-scope"
+        auth.FABRIC_SCOPE = "fabric-scope"
+        auth._ensure_authenticated = Mock(return_value=None)
+        auth.list_fabric_workspaces = Mock(return_value=(True, [{"id": "workspace-pipeline", "displayName": "dev-ocean"}]))
+        auth.list_fabric_pipelines = Mock(return_value=(True, [{"id": "pipeline-1", "displayName": "Refresh Dimensions"}]))
+        auth.list_fabric_pipeline_runs = Mock(return_value=(True, [{"id": "pipeline-run-1", "status": "NotStarted"}]))
+        auth.trigger_fabric_pipeline = Mock(return_value=(True, {"id": "pipeline-run-1"}))
+        auth.get_fabric_pipeline_run = Mock(
+            return_value=(
+                True,
+                {
+                    "id": "pipeline-run-1",
+                    "status": "NotStarted",
+                    "startTimeUtc": "2026-06-03T12:00:00Z",
+                    "endTimeUtc": "",
+                    "failureReason": None,
+                },
+            )
+        )
         get_online_auth.return_value = auth
         upload_mapping.return_value = {
             "source_relative_path": "a.xlsx",
@@ -258,10 +282,14 @@ class DimensionLoaderStateTests(unittest.TestCase):
 
         mock_thread.side_effect = _FakeThread
 
-        status, progress, detail, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
+        status, progress, detail, pipeline_status, pipeline_event, pipeline_details, pipeline_link, state, disabled = dls._sync_dimension_jobs("dev")  # noqa: SLF001
         self.assertIn("Sync started for DEV", status)
         self.assertEqual(progress, "0/1")
         self.assertIn("DEV", detail)
+        self.assertEqual(pipeline_status, "")
+        self.assertEqual(pipeline_event, "")
+        self.assertEqual(pipeline_details, "")
+        self.assertEqual(pipeline_link, "")
         self.assertFalse(disabled)
         self.assertTrue(str(state["run_id"]))
         live_state = dls._get_sync_state(str(state["run_id"]))  # noqa: SLF001
@@ -269,6 +297,18 @@ class DimensionLoaderStateTests(unittest.TestCase):
         self.assertEqual(
             dls._build_progress_detail(live_state),  # noqa: SLF001
             "DEV | [DEV] Core Dimensions | a.xlsx",
+        )
+        self.assertIn("Pipeline: InProgress", dls._build_pipeline_status_text(live_state))  # noqa: SLF001
+        self.assertIn("Triggered pipeline for DEV", dls._build_pipeline_event_text(live_state))  # noqa: SLF001
+        self.assertIn("Pipeline details: Started: 2026-06-03 12:00:00 UTC", dls._build_pipeline_details_text(live_state))  # noqa: SLF001
+        self.assertIn("Elapsed:", dls._build_pipeline_details_text(live_state))  # noqa: SLF001
+        self.assertIn("app.powerbi.com/workloads/data-pipeline/monitoring", dls._build_pipeline_link(live_state))  # noqa: SLF001
+        auth.list_fabric_workspaces.assert_called_once()
+        auth.list_fabric_pipelines.assert_called_once_with("workspace-pipeline")
+        auth.trigger_fabric_pipeline.assert_called_once_with(
+            "workspace-pipeline",
+            "pipeline-1",
+            parameters={"mode": "dev", "environment": "dev"},
         )
         upload_mapping.assert_called_once()
         self.assertEqual(upload_mapping.call_args.args[1]["source_relative_path"], "a.xlsx")
