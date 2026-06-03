@@ -49,6 +49,37 @@ def _build_run_folder_name() -> str:
     return f"{timestamp}_{uuid.uuid4().hex[:8]}"
 
 
+def _parse_fabric_timestamp(timestamp_text: str | None) -> datetime | None:
+    if not timestamp_text:
+        return None
+    normalized = str(timestamp_text).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_fabric_timestamp(timestamp_text: str | None) -> str:
+    parsed = _parse_fabric_timestamp(timestamp_text)
+    if parsed is None:
+        return str(timestamp_text or "").strip()
+    return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_duration_seconds(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return ""
+    total_seconds = int(seconds)
+    minutes, secs = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def _create_sync_state(environment: str | None, total_files: int = 0) -> dict[str, object]:
     selected_env = environment if environment in {"dev", "prod"} else "dev"
     return {
@@ -65,6 +96,9 @@ def _create_sync_state(environment: str | None, total_files: int = 0) -> dict[st
         "pipeline_run_id": "",
         "pipeline_status": "",
         "pipeline_event": "",
+        "pipeline_start_time": "",
+        "pipeline_end_time": "",
+        "pipeline_failure_reason": "",
         "processed_files": 0,
         "total_files": total_files,
         "error": None,
@@ -132,6 +166,13 @@ def _build_transfer_text(state: dict[str, object] | None) -> str:
     return "Waiting for transfer progress..."
 
 
+def _build_sharepoint_folder_link(folder_url: str) -> html.A | str:
+    folder_url = str(folder_url or "").strip()
+    if not folder_url:
+        return ""
+    return html.A("Open SharePoint folder", href=folder_url, target="_blank", rel="noopener noreferrer")
+
+
 def _build_pipeline_link(state: dict[str, object] | None) -> str:
     if not state:
         return ""
@@ -167,6 +208,40 @@ def _build_pipeline_event_text(state: dict[str, object] | None) -> str:
     return ""
 
 
+def _build_pipeline_details_text(state: dict[str, object] | None) -> str:
+    if not state:
+        return ""
+
+    pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
+    pipeline_status = _build_pipeline_status_text(state)
+    pipeline_start_time = str(state.get("pipeline_start_time", "")).strip()
+    pipeline_end_time = str(state.get("pipeline_end_time", "")).strip()
+    pipeline_failure_reason = str(state.get("pipeline_failure_reason", "")).strip()
+
+    details: list[str] = []
+    start_dt = _parse_fabric_timestamp(pipeline_start_time)
+    end_dt = _parse_fabric_timestamp(pipeline_end_time)
+
+    if pipeline_start_time:
+        details.append(f"Started: {_format_fabric_timestamp(pipeline_start_time)}")
+    if start_dt is not None and end_dt is not None:
+        duration_seconds = max((end_dt - start_dt).total_seconds(), 0.0)
+        details.append(f"Duration: {_format_duration_seconds(duration_seconds)}")
+    elif start_dt is not None and pipeline_run_id and _pipeline_is_active(pipeline_status.removeprefix("Pipeline: ")):
+        elapsed_seconds = max((datetime.now(timezone.utc) - start_dt).total_seconds(), 0.0)
+        details.append(f"Elapsed: {_format_duration_seconds(elapsed_seconds)}")
+    if pipeline_end_time:
+        details.append(f"Ended: {_format_fabric_timestamp(pipeline_end_time)}")
+    if pipeline_failure_reason:
+        details.append(f"Failure reason: {pipeline_failure_reason}")
+
+    if details:
+        return "Pipeline details: " + " | ".join(details)
+    if pipeline_run_id:
+        return "Pipeline details: waiting for Fabric timestamps"
+    return ""
+
+
 def _build_pipeline_link_component(state: dict[str, object] | None):
     workspace_id = str(state.get("pipeline_workspace_id", "")).strip() if state else ""
     pipeline_id = str(state.get("pipeline_id", "")).strip() if state else ""
@@ -188,6 +263,22 @@ def _pipeline_is_active(status_text: str) -> bool:
     return status_text.strip().lower() in {"notstarted", "queued", "inprogress", "running"}
 
 
+def _pipeline_is_terminal(state: dict[str, object] | None) -> bool:
+    if not state:
+        return False
+    status_text = _build_pipeline_status_text(state).removeprefix("Pipeline: ").strip().lower()
+    return status_text in {"succeeded", "completed", "failed", "error", "cancelled", "canceled", "partially_succeeded"}
+
+
+def _pipeline_needs_polling(state: dict[str, object] | None) -> bool:
+    if not state:
+        return False
+    pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
+    if not pipeline_run_id:
+        return False
+    return not _pipeline_is_terminal(state)
+
+
 def _refresh_pipeline_status(state: dict[str, object]) -> dict[str, object]:
     pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
     pipeline_workspace_id = str(state.get("pipeline_workspace_id", "")).strip()
@@ -198,16 +289,48 @@ def _refresh_pipeline_status(state: dict[str, object]) -> dict[str, object]:
     from services.fabric_uploader_cli import app as uploader
 
     auth = uploader._online_auth()
+    run_payload = None
     success, payload = auth.get_fabric_pipeline_run(pipeline_workspace_id, pipeline_id, pipeline_run_id)
-    if not success:
-        state["pipeline_status"] = f"Pipeline: unable to load status"
-        return state
-    if not isinstance(payload, dict):
+    if success and isinstance(payload, dict):
+        run_payload = payload
+    if run_payload is None:
+        success, payload = auth.list_fabric_pipeline_runs(pipeline_workspace_id, pipeline_id)
+        if success and isinstance(payload, list) and payload:
+            run_payload = next(
+                (
+                    item
+                    for item in payload
+                    if str(
+                        item.get("id")
+                        or item.get("jobInstanceId")
+                        or item.get("jobId")
+                        or item.get("runId")
+                        or ""
+                    ).strip()
+                    == pipeline_run_id
+                ),
+                payload[0],
+            )
+    if not isinstance(run_payload, dict):
         state["pipeline_status"] = "Pipeline: status unavailable"
         return state
-    status_text = _extract_pipeline_status(payload)
+
+    state.update(
+        {
+            "pipeline_start_time": str(run_payload.get("startTimeUtc", "")).strip(),
+            "pipeline_end_time": str(run_payload.get("endTimeUtc", "")).strip(),
+            "pipeline_failure_reason": str(run_payload.get("failureReason", "")).strip(),
+        }
+    )
+    status_text = _extract_pipeline_status(run_payload)
+    normalized_status = status_text.lower()
+    if normalized_status == "notstarted" and state.get("pipeline_start_time") and not state.get("pipeline_end_time"):
+        status_text = "InProgress"
+        normalized_status = status_text.lower()
     if status_text:
         state["pipeline_status"] = f"Pipeline: {status_text}"
+        if normalized_status in {"succeeded", "completed", "failed", "error", "cancelled", "canceled", "partially_succeeded"}:
+            state["pipeline_event"] = f"Pipeline finished with status: {status_text}"
     return state
 
 
@@ -235,6 +358,11 @@ def _extract_pipeline_status(payload: dict[str, object] | None) -> str:
         or payload.get("state")
         or payload.get("runStatus")
         or payload.get("jobStatus")
+        or payload.get("externalStatus")
+        or payload.get("pipelineStatus")
+        or payload.get("currentStatus")
+        or payload.get("statusText")
+        or payload.get("operationStatus")
         or ""
     )
     status = str(raw_status).strip()
@@ -298,6 +426,10 @@ def build_interim_solution_content():
                     html.Div(
                         id="interim-solution-pipeline-event",
                         className="govuk-!-margin-top-1 govuk-body govuk-!-font-family-monospace",
+                    ),
+                    html.Div(
+                        id="interim-solution-pipeline-details",
+                        className="govuk-!-margin-top-1 govuk-body",
                     ),
                     html.Div(
                         id="interim-solution-pipeline-link",
@@ -385,6 +517,19 @@ def _build_action_panel(environment: str | None):
                         id="interim-solution-sync",
                         className="govuk-button",
                     ),
+                ],
+            ),
+            html.Ul(
+                className="govuk-list govuk-list--spaced govuk-!-margin-bottom-2",
+                children=[
+                    html.Li(
+                        children=[
+                            html.Span(f"{str(job.get('name', '')).strip() or 'Unnamed job'}", className="govuk-!-font-weight-bold"),
+                            html.Span(" | ", className="govuk-hint"),
+                            _build_sharepoint_folder_link(job.get("source_folder_url", "")),
+                        ]
+                    )
+                    for job in jobs
                 ],
             ),
             html.P(
@@ -677,6 +822,11 @@ def _interim_sync_worker(
                         + (f" run_id={pipeline_run_id}" if pipeline_run_id else "")
                     ),
                 )
+                refreshed_state = _refresh_pipeline_status(_get_sync_state(run_id) or {})
+                _set_sync_state(
+                    run_id,
+                    **{key: value for key, value in refreshed_state.items() if key != "run_id"},
+                )
             except Exception as exc:  # pylint:disable=broad-except
                 pipeline_failures += 1
                 _debug(f"Pipeline trigger failed for {job_name}: {exc}")
@@ -767,6 +917,7 @@ def _start_sync_run(uploader, config: dict[str, object], selected_env: str, jobs
         _build_transfer_text(state),
         _build_pipeline_status_text(state),
         _build_pipeline_event_text(state),
+        _build_pipeline_details_text(state),
         "",
         state,
         False,
@@ -778,7 +929,7 @@ def _sync_dimension_jobs(environment: str | None):
     selected_env = environment if environment in {"dev", "prod"} else "dev"
     _debug(f"Sync requested env={selected_env}")
     if config_error:
-        return config_error, "", "", "", "", "", "", {"environment": selected_env, "running": False, "done": True}, True
+        return config_error, "", "", "", "", "", "", "", "", no_update, {"environment": selected_env, "running": False, "done": True}, True
 
     missing_env_vars = get_missing_env_vars()
     if missing_env_vars:
@@ -787,7 +938,7 @@ def _sync_dimension_jobs(environment: str | None):
             + ", ".join(missing_env_vars)
             + "."
         )
-        return message, "", "", "", "", "", "", {"environment": selected_env, "running": False, "done": True}, True
+        return message, "", "", "", "", "", "", "", "", no_update, {"environment": selected_env, "running": False, "done": True}, True
 
     jobs = [
         job
@@ -803,6 +954,8 @@ def _sync_dimension_jobs(environment: str | None):
             "",
             "",
             "",
+            "",
+            no_update,
             {"environment": selected_env, "running": False, "done": True, "processed_files": 0, "total_files": 0},
             True,
         )
@@ -827,6 +980,7 @@ def register_interim_solution_callbacks(app):
         Output("interim-solution-transfer", "children"),
         Output("interim-solution-pipeline-status", "children"),
         Output("interim-solution-pipeline-event", "children"),
+        Output("interim-solution-pipeline-details", "children"),
         Output("interim-solution-pipeline-link", "children"),
         Output("interim-solution-results", "children"),
         Output("interim-solution-sync-state", "data"),
@@ -846,13 +1000,13 @@ def register_interim_solution_callbacks(app):
         _debug(f"Callback action trigger={component_id} environment={environment}")
         if component_id == "interim-solution-refresh":
             status = _build_action_result(component_id, environment)
-            return status, "", "", "", "", "", "", no_update, None, True
+            return status, "", "", "", "", "", "", "", no_update, None, True
         if component_id == "interim-solution-list":
             status = _build_action_result(component_id, environment)
-            return status, "", "", "", "", "", "", _build_list_results(environment), None, True
+            return status, "", "", "", "", "", "", "", _build_list_results(environment), None, True
         if component_id == "interim-solution-sync":
-            status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, state, disabled = _sync_dimension_jobs(environment)
-            return status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, no_update, state, disabled
+            status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_details, pipeline_link, state, disabled = _sync_dimension_jobs(environment)
+            return status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_details, pipeline_link, no_update, state, disabled
         if component_id == "interim-solution-environment":
             raise PreventUpdate
         raise PreventUpdate
@@ -863,6 +1017,7 @@ def register_interim_solution_callbacks(app):
         Output("interim-solution-transfer", "children", allow_duplicate=True),
         Output("interim-solution-pipeline-status", "children", allow_duplicate=True),
         Output("interim-solution-pipeline-event", "children", allow_duplicate=True),
+        Output("interim-solution-pipeline-details", "children", allow_duplicate=True),
         Output("interim-solution-pipeline-link", "children", allow_duplicate=True),
         Output("interim-solution-status", "children", allow_duplicate=True),
         Output("interim-solution-sync-state", "data", allow_duplicate=True),
@@ -884,8 +1039,9 @@ def register_interim_solution_callbacks(app):
         transfer = _build_transfer_text(state)
         pipeline_status = _build_pipeline_status_text(state)
         pipeline_event = _build_pipeline_event_text(state)
+        pipeline_details = _build_pipeline_details_text(state)
         pipeline_link_url = _build_pipeline_link(state)
         pipeline_link = _build_pipeline_link_component(state)
         status = str(state.get("status", "")).strip()
-        disabled = not bool(state.get("running", False)) and not _pipeline_is_active(pipeline_status)
-        return progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, status, state, disabled
+        disabled = not bool(state.get("running", False)) and not _pipeline_needs_polling(state)
+        return progress, detail, transfer, pipeline_status, pipeline_event, pipeline_details, pipeline_link, status, state, disabled

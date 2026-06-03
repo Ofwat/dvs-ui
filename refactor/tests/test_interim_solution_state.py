@@ -106,6 +106,7 @@ class InterimSolutionStateTests(unittest.TestCase):
         self.assertEqual(self._count_text(panel, "Refresh files"), 1)
         self.assertEqual(self._count_text(panel, "List files"), 1)
         self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
+        self.assertEqual(self._count_text(panel, "Open SharePoint folder"), 1)
         self.assertEqual(
             iss._build_action_result("interim-solution-refresh", "dev"),  # noqa: SLF001
             "Refreshed 1 job(s) for DEV from the Interim Solution config.",
@@ -195,7 +196,19 @@ class InterimSolutionStateTests(unittest.TestCase):
                 },
             )
         )
-        auth.list_fabric_pipeline_runs = Mock(return_value=(True, [{"id": "pipeline-run-1", "status": "Queued"}]))
+        auth.get_fabric_pipeline_run = Mock(
+            return_value=(
+                True,
+                {
+                    "id": "pipeline-run-1",
+                    "status": "NotStarted",
+                    "startTimeUtc": "2026-06-03T12:00:00Z",
+                    "endTimeUtc": "",
+                    "failureReason": None,
+                },
+            )
+        )
+        auth.list_fabric_pipeline_runs = Mock(return_value=(True, [{"id": "pipeline-run-1", "status": "NotStarted"}]))
         iss._SYNC_RUNS.clear()  # noqa: SLF001
         with patch("pages.interim_solution_service.threading.Thread") as mock_thread:
             class _FakeThread:
@@ -211,7 +224,7 @@ class InterimSolutionStateTests(unittest.TestCase):
             mock_thread.side_effect = _FakeThread
             with patch("pages.interim_solution_service._build_run_folder_name", return_value="20260603T120000Z_abcd1234"):
                 with patch("services.fabric_uploader_cli.app._online_auth", return_value=auth):
-                    status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_link, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
+                    status, progress, detail, transfer, pipeline_status, pipeline_event, pipeline_details, pipeline_link, state, disabled = iss._sync_dimension_jobs("dev")  # noqa: SLF001
 
         self.assertIn("Sync started for DEV", status)
         self.assertEqual(progress, "0/1")
@@ -220,19 +233,21 @@ class InterimSolutionStateTests(unittest.TestCase):
         self.assertIn("Waiting for transfer progress", transfer)
         self.assertEqual(pipeline_status, "")
         self.assertEqual(pipeline_event, "")
+        self.assertEqual(pipeline_details, "")
         self.assertEqual(pipeline_link, "")
         self.assertFalse(disabled)
         live_state = iss._get_sync_state(str(state["run_id"]))  # noqa: SLF001
         self.assertEqual(iss._build_progress_text(live_state), "1/1")  # noqa: SLF001
         self.assertIn("file1.xlsx", iss._build_progress_detail(live_state))  # noqa: SLF001
         self.assertIn("20260603T120000Z_abcd1234", iss._build_progress_detail(live_state))  # noqa: SLF001
-        self.assertIn("Pipeline: queued", iss._build_pipeline_status_text(live_state))  # noqa: SLF001
-        self.assertIn("Triggered pipeline for job=[DEV] Dummy Models", iss._build_pipeline_event_text(live_state))  # noqa: SLF001
+        self.assertIn("Pipeline: InProgress", iss._build_pipeline_status_text(live_state))  # noqa: SLF001
+        self.assertIn("Pipeline details: Started: 2026-06-03 12:00:00 UTC", iss._build_pipeline_details_text(live_state))  # noqa: SLF001
+        self.assertIn("Elapsed:", iss._build_pipeline_details_text(live_state))  # noqa: SLF001
         self.assertIn("app.powerbi.com/workloads/data-pipeline/monitoring", iss._build_pipeline_link(live_state))  # noqa: SLF001
         upload_bytes_with_progress.assert_called_once()
         auth.list_fabric_workspaces.assert_called_once()
         auth.list_fabric_pipelines.assert_called_once_with("workspace-pipeline")
-        auth.list_fabric_pipeline_runs.assert_called_once_with("workspace-pipeline", "pipeline-1")
+        auth.get_fabric_pipeline_run.assert_any_call("workspace-pipeline", "pipeline-1", "pipeline-run-1")
         auth.trigger_fabric_pipeline.assert_called_once_with(
             "workspace-pipeline",
             "pipeline-1",
