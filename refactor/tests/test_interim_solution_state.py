@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REFACTOR_DIR = Path(__file__).resolve().parents[1]
 if str(REFACTOR_DIR) not in sys.path:
@@ -43,6 +43,11 @@ class InterimSolutionStateTests(unittest.TestCase):
                     "source_kind": "sharepoint",
                     "source_folder_url": "https://example.test/folder",
                     "target_root": "Files/test",
+                    "pipeline": {
+                        "workspace_display_name": "dev-ocean",
+                        "pipeline_display_name": "Refresh Interim",
+                        "parameters": {"mode": "dev"},
+                    },
                     "fabric": {
                         "workspace_display_name": "dev-ocean",
                         "lakehouse_display_name": "Source_Data",
@@ -159,6 +164,11 @@ class InterimSolutionStateTests(unittest.TestCase):
                 "source_kind": "sharepoint",
                 "source_folder_url": "https://example.test/folder",
                 "target_root": "Files/test",
+                "pipeline": {
+                    "workspace_display_name": "dev-ocean",
+                    "pipeline_display_name": "Refresh Interim",
+                    "parameters": {"mode": "dev"},
+                },
                 "fabric": {
                     "workspace_display_name": "dev-ocean",
                     "lakehouse_display_name": "Source_Data",
@@ -169,15 +179,23 @@ class InterimSolutionStateTests(unittest.TestCase):
     @patch("pages.interim_solution_service.load_service_config", return_value=({"jobs": []}, None))
     def test_sync_action_updates_counter(self, *mocks):
         upload_bytes_with_progress = mocks[-1]
-        auth = type(
-            "Auth",
-            (),
-            {
-                "SHAREPOINT_SCOPE": "sp-scope",
-                "FABRIC_SCOPE": "fabric-scope",
-                "_ensure_authenticated": lambda self, scope: None,
-            },
-        )()
+        auth = Mock()
+        auth.SHAREPOINT_SCOPE = "sp-scope"
+        auth.FABRIC_SCOPE = "fabric-scope"
+        auth._ensure_authenticated = Mock(return_value=None)
+        auth.list_fabric_workspaces = Mock(return_value=(True, [{"id": "workspace-pipeline", "displayName": "dev-ocean"}]))
+        auth.list_fabric_pipelines = Mock(return_value=(True, [{"id": "pipeline-1", "displayName": "Refresh Interim"}]))
+        auth.trigger_fabric_pipeline = Mock(
+            return_value=(
+                True,
+                {
+                    "id": "pipeline-run-1",
+                    "workspace_id": "workspace-pipeline",
+                    "pipeline_id": "pipeline-1",
+                    "parameters": {"mode": "dev"},
+                },
+            )
+        )
         iss._SYNC_RUNS.clear()  # noqa: SLF001
         with patch("pages.interim_solution_service.threading.Thread") as mock_thread:
             class _FakeThread:
@@ -205,6 +223,13 @@ class InterimSolutionStateTests(unittest.TestCase):
         self.assertIn("file1.xlsx", iss._build_progress_detail(live_state))  # noqa: SLF001
         self.assertIn("20260603T120000Z_abcd1234", iss._build_progress_detail(live_state))  # noqa: SLF001
         upload_bytes_with_progress.assert_called_once()
+        auth.list_fabric_workspaces.assert_called_once()
+        auth.list_fabric_pipelines.assert_called_once_with("workspace-pipeline")
+        auth.trigger_fabric_pipeline.assert_called_once_with(
+            "workspace-pipeline",
+            "pipeline-1",
+            parameters={"mode": "dev", "input_folder_path": "Files/test/20260603T120000Z_abcd1234"},
+        )
         self.assertEqual(
             upload_bytes_with_progress.call_args.args[2],
             "Files/test/20260603T120000Z_abcd1234/dev/file1.xlsx",

@@ -48,6 +48,16 @@ def _job_source_folder_url(job: dict[str, Any]) -> str:
     return str(source_links[0]).strip() if source_links else ""
 
 
+def _job_pipeline(job: dict[str, Any]) -> dict[str, Any]:
+    pipeline = job.get("pipeline", {}) if isinstance(job.get("pipeline"), dict) else {}
+    parameters = pipeline.get("parameters", {}) if isinstance(pipeline.get("parameters"), dict) else {}
+    return {
+        "workspace_display_name": str(pipeline.get("workspace_display_name", "")).strip(),
+        "pipeline_display_name": str(pipeline.get("pipeline_display_name", "")).strip(),
+        "parameters": dict(parameters),
+    }
+
+
 def _is_interim_job(job: dict[str, Any]) -> bool:
     if not isinstance(job, dict):
         return False
@@ -58,6 +68,10 @@ def _is_interim_job(job: dict[str, Any]) -> bool:
         return False
     target_root = str(job.get("target_root", "")).strip()
     return bool(target_root)
+
+
+def get_interim_pipeline_config(job: dict[str, Any]) -> dict[str, Any]:
+    return _job_pipeline(job)
 
 
 def get_interim_jobs_by_environment(config: dict[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
@@ -75,6 +89,7 @@ def get_interim_jobs_by_environment(config: dict[str, Any] | None) -> dict[str, 
                 "lakehouse_display_name": str(fabric.get("lakehouse_display_name", "")).strip(),
                 "source_folder_url": _job_source_folder_url(job),
                 "target_root": str(job.get("target_root", "")).strip(),
+                **_job_pipeline(job),
             }
         )
     return grouped

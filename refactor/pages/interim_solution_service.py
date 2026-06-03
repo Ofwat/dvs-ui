@@ -10,6 +10,7 @@ from dash.exceptions import PreventUpdate
 from .interim_solution_state import (
     get_interim_jobs,
     get_interim_jobs_by_environment,
+    get_interim_pipeline_config,
     get_missing_env_vars,
     load_service_config,
 )
@@ -32,6 +33,15 @@ INTERIM_SOLUTION_SERVICE = {
 
 def _debug(message: str) -> None:
     print(f"[InterimSolution] {message}", flush=True)
+
+
+def _find_by_display_name(items: list[dict[str, object]], display_name: str, label: str) -> dict[str, object]:
+    matches = [item for item in items if str(item.get("displayName", "")).strip() == display_name]
+    if not matches:
+        raise RuntimeError(f"{label} with displayName '{display_name}' was not found.")
+    if len(matches) > 1:
+        raise RuntimeError(f"{label} with displayName '{display_name}' is not unique.")
+    return matches[0]
 
 
 def _build_run_folder_name() -> str:
@@ -234,7 +244,7 @@ def _build_action_panel(environment: str | None):
                 ],
             ),
             html.P(
-                "Refresh updates the job summary, List shows the configured folders, and Sync uploads every file in the SharePoint folder.",
+                "Refresh updates the job summary, List shows the configured folders, and Sync uploads every file in the SharePoint folder before triggering any configured pipeline.",
                 className="govuk-hint govuk-!-margin-bottom-0",
             ),
         ],
@@ -326,6 +336,45 @@ def _scan_sharepoint_folder(folder_url: str) -> list[dict[str, object]]:
     return [item for item in items if not item.get("isFolder")]
 
 
+def _trigger_configured_pipeline(uploader, job: dict[str, object]) -> str | None:
+    pipeline = get_interim_pipeline_config(job)
+    pipeline_workspace_name = str(pipeline.get("workspace_display_name", "")).strip()
+    pipeline_display_name = str(pipeline.get("pipeline_display_name", "")).strip()
+    if not pipeline_workspace_name or not pipeline_display_name:
+        return None
+
+    common = uploader._common()
+    auth = uploader._online_auth()
+    workspaces_ok, workspaces_payload = auth.list_fabric_workspaces()
+    common.require_ok("list_fabric_workspaces", workspaces_ok, workspaces_payload)
+    pipeline_workspace = _find_by_display_name(list(workspaces_payload), pipeline_workspace_name, "Pipeline workspace")
+    pipeline_workspace_id = str(pipeline_workspace["id"])
+
+    pipelines_ok, pipelines_payload = auth.list_fabric_pipelines(pipeline_workspace_id)
+    common.require_ok("list_fabric_pipelines", pipelines_ok, pipelines_payload)
+    pipeline_item = _find_by_display_name(list(pipelines_payload), pipeline_display_name, "Pipeline")
+    pipeline_id = str(pipeline_item["id"])
+
+    raw_parameters = pipeline.get("parameters", {})
+    parameters = dict(raw_parameters) if isinstance(raw_parameters, dict) else {}
+    input_folder_path = str(job.get("_run_folder_path", "")).strip()
+    if input_folder_path:
+        parameters["input_folder_path"] = input_folder_path
+    parameters = parameters or None
+    trigger_ok, trigger_payload = auth.trigger_fabric_pipeline(pipeline_workspace_id, pipeline_id, parameters=parameters)
+    common.require_ok("trigger_fabric_pipeline", trigger_ok, trigger_payload)
+    raw_run_id = (
+        trigger_payload.get("id")
+        or trigger_payload.get("jobInstanceId")
+        or trigger_payload.get("jobId")
+        or trigger_payload.get("runId")
+    )
+    pipeline_run_id = str(raw_run_id).strip() if raw_run_id is not None else ""
+    if pipeline_run_id.lower() == "none":
+        pipeline_run_id = ""
+    return pipeline_run_id or None
+
+
 def _interim_sync_worker(
     run_id: str,
     uploader,
@@ -357,6 +406,7 @@ def _interim_sync_worker(
         processed_files = 0
         successes = 0
         failures = 0
+        pipeline_failures = 0
         last_job_name = ""
         last_file_name = ""
         for job_entry in prepared_jobs:
@@ -364,6 +414,7 @@ def _interim_sync_worker(
             files = list(job_entry["files"])
             job_name = str(job.get("name", "")).strip() or "Unnamed job"
             folder_url = str(job.get("source_folder_url", "")).strip()
+            job_failures = 0
             last_job_name = job_name
             _debug(f"Scanning folder for job={job_name}")
             _set_sync_state(
@@ -407,6 +458,7 @@ def _interim_sync_worker(
                 except Exception as exc:  # pylint:disable=broad-except
                     _debug(f"Upload failed for {source_relative_path}: {exc}")
                     failures += 1
+                    job_failures += 1
                 finally:
                     processed_files += 1
                     _set_sync_state(
@@ -416,6 +468,52 @@ def _interim_sync_worker(
                         current_file=source_relative_path,
                         status=f"Processing {processed_files}/{total_files}",
                     )
+
+            if not files:
+                continue
+
+            pipeline = get_interim_pipeline_config(job)
+            if not str(pipeline.get("workspace_display_name", "")).strip() or not str(
+                pipeline.get("pipeline_display_name", "")
+            ).strip():
+                continue
+            if job_failures:
+                _debug(f"Skipping pipeline trigger for {job_name} because {job_failures} file(s) failed")
+                _set_sync_state(
+                    run_id,
+                    current_job=job_name,
+                    status=f"Skipping pipeline trigger for {job_name} because {job_failures} file(s) failed.",
+                )
+                continue
+
+            _debug(f"Triggering pipeline for job={job_name}")
+            _set_sync_state(
+                run_id,
+                current_job=job_name,
+                status=f"Triggering pipeline for {job_name}",
+            )
+            try:
+                pipeline_run_id = _trigger_configured_pipeline(uploader, job)
+                _debug(
+                    f"Triggered pipeline for job={job_name}"
+                    + (f" run_id={pipeline_run_id}" if pipeline_run_id else "")
+                )
+                _set_sync_state(
+                    run_id,
+                    current_job=job_name,
+                    status=(
+                        f"Triggered pipeline for {job_name}"
+                        + (f" run_id={pipeline_run_id}" if pipeline_run_id else "")
+                    ),
+                )
+            except Exception as exc:  # pylint:disable=broad-except
+                pipeline_failures += 1
+                _debug(f"Pipeline trigger failed for {job_name}: {exc}")
+                _set_sync_state(
+                    run_id,
+                    current_job=job_name,
+                    status=f"Pipeline trigger failed for {job_name}: {exc}",
+                )
 
         _set_sync_state(
             run_id,
@@ -428,7 +526,8 @@ def _interim_sync_worker(
             total_files=total_files,
             status=(
                 f"Sync complete for {selected_env.upper()}: "
-                f"{successes} successful file(s), {failures} failed file(s)."
+                f"{successes} successful file(s), {failures} failed file(s), "
+                f"{pipeline_failures} pipeline failure(s)."
             ),
         )
     except Exception as exc:  # pylint:disable=broad-except
@@ -458,6 +557,23 @@ def _start_sync_run(uploader, config: dict[str, object], selected_env: str, jobs
     run_id = str(state["run_id"])
     state["current_job_folder"] = run_folder_name
     _SYNC_RUNS[run_id] = dict(state)
+    prepared_jobs = [
+        {
+            **entry,
+            "job": {
+                **entry["job"],
+                "_run_folder_path": "/".join(
+                    part
+                    for part in [
+                        str(entry["job"].get("target_root", "")).strip().rstrip("/"),
+                        run_folder_name,
+                    ]
+                    if part
+                ),
+            },
+        }
+        for entry in prepared_jobs
+    ]
     thread = threading.Thread(
         target=_interim_sync_worker,
         args=(run_id, uploader, {**config, "_run_folder_name": run_folder_name}, selected_env, prepared_jobs, total_files),
