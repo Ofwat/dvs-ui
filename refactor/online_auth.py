@@ -5,6 +5,7 @@ import platform
 import os
 import socket
 import subprocess
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -246,6 +247,13 @@ def _clear_auth_record():
             AUTH_RECORD_PATH.unlink()
 
 
+def clear_authentication_state():
+    global _CREDENTIAL
+    _clear_auth_record()
+    TOKEN_MANAGER.clear_cache()
+    _CREDENTIAL = None
+
+
 def _build_credential(ignore_saved_auth: bool = False) -> InteractiveBrowserCredential:
     kwargs: dict[str, Any] = {}
     if TokenCachePersistenceOptions:
@@ -301,6 +309,53 @@ def _sharepoint_api_url() -> str:
 
 def _cached_token(scope: str) -> dict[str, Any] | None:
     return TOKEN_MANAGER.get_cached_token(scope)
+
+
+def _format_identity_name(username: str) -> str:
+    local_part = username.split("@", 1)[0].strip()
+    if not local_part:
+        return username
+    words = [part for part in re.split(r"[._\-\s]+", local_part) if part]
+    if not words:
+        return local_part
+    return " ".join(word.capitalize() for word in words)
+
+
+def _build_initials(source: str) -> str:
+    cleaned = source.split("@", 1)[0].strip()
+    parts = [part for part in re.split(r"[._\-\s]+", cleaned) if part]
+    if not parts:
+        return (cleaned[:2] or "?").upper()
+    initials = "".join(part[0] for part in parts[:2]).upper()
+    return initials or "?"
+
+
+def get_current_auth_identity() -> dict[str, Any]:
+    record = _load_auth_record()
+    if not record:
+        return {
+            "signed_in": False,
+            "display_name": None,
+            "username": None,
+            "initials": None,
+            "status_message": "Not signed in.",
+        }
+
+    username = getattr(record, "username", None) or ""
+    display_name = _format_identity_name(username) if username else "Signed in"
+    token_data = _cached_token(SHAREPOINT_SCOPE)
+    if token_data:
+        expires_in = max(0, int(token_data["expires_on"] - time.time()))
+        status_message = f"Signed in. Token expires in {expires_in}s."
+    else:
+        status_message = "Signed in."
+    return {
+        "signed_in": True,
+        "display_name": display_name,
+        "username": username or None,
+        "initials": _build_initials(username or display_name),
+        "status_message": status_message,
+    }
 
 
 def get_cached_access_status() -> tuple[bool, str]:

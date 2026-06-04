@@ -58,6 +58,9 @@ class TokenManager:
     def invalidate(self, scope: str):
         self._cache.pop(scope, None)
 
+    def clear_cache(self):
+        self._cache.clear()
+
     def _is_stale(self, entry: TokenEntry) -> bool:
         return entry.expires_on <= (self._time_fn() + self._refresh_margin_seconds)
 
@@ -71,4 +74,3 @@ class TokenManager:
         if token_value is None or expires_on is None:
             raise ValueError("token_provider must return token and expires_on")
         return TokenEntry(token=str(token_value), expires_on=float(expires_on))
-

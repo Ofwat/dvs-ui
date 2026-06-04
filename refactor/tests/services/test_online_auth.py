@@ -102,6 +102,31 @@ class OnlineAuthTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(result_holder["response"], {"code": "abc123", "state": "xyz"})
 
+    @patch("refactor.online_auth._cached_token")
+    @patch("refactor.online_auth._load_auth_record")
+    def test_get_current_auth_identity_uses_cached_record(self, load_auth_record, cached_token):
+        load_auth_record.return_value = SimpleNamespace(username="user@example.com")
+        cached_token.return_value = {"token": "tok", "expires_on": 2000.0}
+
+        identity = online_auth.get_current_auth_identity()
+
+        self.assertTrue(identity["signed_in"])
+        self.assertEqual(identity["display_name"], "User Example")
+        self.assertEqual(identity["username"], "user@example.com")
+        self.assertEqual(identity["initials"], "UE")
+        self.assertIn("Signed in", identity["status_message"])
+
+    @patch("refactor.online_auth._clear_auth_record")
+    @patch("refactor.online_auth.TOKEN_MANAGER")
+    def test_clear_authentication_state_clears_tokens_and_record(self, token_manager, clear_auth_record):
+        online_auth._CREDENTIAL = object()  # noqa: SLF001
+
+        online_auth.clear_authentication_state()
+
+        clear_auth_record.assert_called_once()
+        token_manager.clear_cache.assert_called_once()
+        self.assertIsNone(online_auth._CREDENTIAL)  # noqa: SLF001
+
 
 if __name__ == "__main__":
     unittest.main()

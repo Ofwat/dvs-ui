@@ -13,12 +13,13 @@ import dash
 from dash import Input, Output, State, MATCH, dcc, dash_table, html
 from dash.exceptions import PreventUpdate
 
-from components.header import build_header
 from components.service_navigation import build_service_navigation
+from components.header import build_auth_widget, build_header
 from pages import DEFAULT_PAGE, get_navigation_pages, get_page_by_path
 from pages.data_validation_service import register_online_mode_callbacks
 from pages.dimension_loader_service import register_dimension_loader_callbacks
 from pages.interim_solution_service import register_interim_solution_callbacks
+from online_auth import check_token_access, clear_authentication_state, get_current_auth_identity
 from template_utils import build_index_string
 from env_utils import load_env
 
@@ -39,7 +40,7 @@ app.layout = html.Div(
     className="refactor-app",
     children=[
         dcc.Location(id="url", refresh=False),
-        build_header(),
+        build_header(build_auth_widget(get_current_auth_identity())),
         html.Div(
             id="service-navigation-wrapper",
             className=initial_page["nav_class"],
@@ -66,6 +67,29 @@ app.layout = html.Div(
 register_online_mode_callbacks(app)
 register_dimension_loader_callbacks(app)
 register_interim_solution_callbacks(app)
+
+
+@app.callback(
+    Output("auth-widget", "children"),
+    Input("url", "pathname"),
+    Input("auth-login-button", "n_clicks", allow_optional=True),
+    Input("auth-logout-button", "n_clicks", allow_optional=True),
+)
+def render_auth_widget(_pathname: str | None, _login_clicks: int | None, _logout_clicks: int | None):
+    triggered_id = dash.callback_context.triggered_id
+    if triggered_id == "auth-login-button":
+        success, payload = check_token_access(force=True)
+        if not success:
+            return build_auth_widget(
+                {
+                    "signed_in": False,
+                    "status_message": f"Sign in failed: {payload}",
+                }
+            )
+    elif triggered_id == "auth-logout-button":
+        clear_authentication_state()
+
+    return build_auth_widget(get_current_auth_identity())
 
 
 @app.callback(
