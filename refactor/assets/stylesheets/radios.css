@@ -1,8 +1,4 @@
-.app-radio-group {
-  margin-top: 0.25rem;
-}
-
-.app-radio-group label.app-radio-group__label {
+.govuk-radios label.govuk-radios__label {
   box-sizing: border-box;
   position: relative;
   display: block;
@@ -13,12 +9,12 @@
   cursor: pointer;
 }
 
-.app-radio-group label.app-radio-group__label.govuk-label {
+.govuk-radios label.govuk-radios__label.govuk-label {
   margin-bottom: 10px;
   max-width: none;
 }
 
-.app-radio-group input[type="radio"] {
+.govuk-radios input[type="radio"] {
   position: absolute;
   top: 0;
   left: 0;
@@ -29,7 +25,7 @@
   cursor: pointer;
 }
 
-.app-radio-group label.app-radio-group__label::before {
+.govuk-radios label.govuk-radios__label::before {
   content: "";
   box-sizing: border-box;
   position: absolute;
@@ -43,7 +39,7 @@
   pointer-events: none;
 }
 
-.app-radio-group label.app-radio-group__label::after {
+.govuk-radios label.govuk-radios__label::after {
   content: "";
   position: absolute;
   top: 12px;
@@ -56,11 +52,11 @@
   pointer-events: none;
 }
 
-.app-radio-group label.app-radio-group__label:has(input[type="radio"]:checked)::after {
+.govuk-radios label.govuk-radios__label:has(input[type="radio"]:checked)::after {
   opacity: 1;
 }
 
-.app-radio-group label.app-radio-group__label:has(input[type="radio"]:focus)::before {
+.govuk-radios label.govuk-radios__label:has(input[type="radio"]:focus)::before {
   border-width: 4px;
   outline: 3px solid transparent;
   outline-offset: 1px;

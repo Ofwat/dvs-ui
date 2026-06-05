@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
+from components.radios import build_radio_group
+
 from .interim_solution_state import (
     get_interim_jobs,
     get_interim_jobs_by_environment,
@@ -406,25 +408,14 @@ def build_interim_solution_content():
                         INTERIM_SOLUTION_SERVICE["description"],
                         className="govuk-body govuk-!-margin-bottom-4",
                     ),
-                    html.H3("Choose environment", className="govuk-heading-m"),
-                    html.Div(
-                        className="govuk-radios govuk-radios--inline govuk-!-margin-bottom-6",
-                        children=[
-                            html.Div(
-                                className="govuk-radios__item",
-                                children=[
-                                    dcc.RadioItems(
-                                        id="interim-solution-environment",
-                                        options=[
-                                            {"label": "dev", "value": "dev"},
-                                            {"label": "prod", "value": "prod"},
-                                        ],
-                                        value="dev",
-                                        inline=True,
-                                    )
-                                ],
-                            )
+                    build_radio_group(
+                        legend="Choose environment",
+                        radio_id="interim-solution-environment",
+                        options=[
+                            {"label": "dev", "value": "dev"},
+                            {"label": "prod", "value": "prod"},
                         ],
+                        value="dev",
                     ),
                     html.Div(id="interim-solution-action-panel"),
                     html.Div(

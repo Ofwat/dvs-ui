@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from components.radios import build_radio_group
 from pages.dimension_loader_service import build_dimension_loader_content
+from pages.interim_solution_service import build_interim_solution_content
 
 
 class RadioGroupTests(unittest.TestCase):
@@ -27,11 +28,11 @@ class RadioGroupTests(unittest.TestCase):
         radios = fieldset.children[1]
         self.assertEqual(component.className, "govuk-form-group")
         self.assertEqual(fieldset.className, "govuk-fieldset")
-        self.assertEqual(radios.className, "govuk-radios app-radio-group")
+        self.assertEqual(radios.className, "govuk-radios")
         self.assertEqual(radios.inputClassName, "govuk-radios__input")
         self.assertEqual(
             radios.labelClassName,
-            "govuk-label app-radio-group__label",
+            "govuk-label govuk-radios__label",
         )
         self.assertFalse(radios.inline)
         self.assertEqual(radios.id, "dimension-loader-environment")
@@ -42,11 +43,23 @@ class RadioGroupTests(unittest.TestCase):
         content = build_dimension_loader_content()
         radios = content.children[0].children[3].children[0].children[1]
         self.assertEqual(radios.id, "dimension-loader-environment")
-        self.assertEqual(radios.className, "govuk-radios app-radio-group")
+        self.assertEqual(radios.className, "govuk-radios")
         self.assertEqual(radios.inputClassName, "govuk-radios__input")
         self.assertEqual(
             radios.labelClassName,
-            "govuk-label app-radio-group__label",
+            "govuk-label govuk-radios__label",
+        )
+        self.assertFalse(radios.inline)
+
+    def test_interim_solution_page_uses_shared_radio_group(self):
+        content = build_interim_solution_content()
+        radios = content.children[0].children[3].children[0].children[1]
+        self.assertEqual(radios.id, "interim-solution-environment")
+        self.assertEqual(radios.className, "govuk-radios")
+        self.assertEqual(radios.inputClassName, "govuk-radios__input")
+        self.assertEqual(
+            radios.labelClassName,
+            "govuk-label govuk-radios__label",
         )
         self.assertFalse(radios.inline)
 
