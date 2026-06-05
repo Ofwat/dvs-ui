@@ -1,4 +1,9 @@
-from dash import dcc, html
+from dash import html
+
+try:
+    from components.button_start import build_start_button
+except ImportError:  # pragma: no cover - lets tests import the package form.
+    from refactor.components.button_start import build_start_button
 
 
 APP_HERO_DESCRIPTION = (
@@ -48,11 +53,7 @@ def build_home_masthead():
                                         className="govuk-heading-xl app-masthead__title",
                                     ),
                                     html.P(APP_HERO_DESCRIPTION, className="app-masthead__description"),
-                                    dcc.Link(
-                                        "Get started",
-                                        href="/get-started",
-                                        className="govuk-button govuk-button--inverse govuk-!-margin-top-6 govuk-!-margin-bottom-0 govuk-button--start",
-                                    ),
+                                    build_start_button(address="/get-started"),
                                 ],
                             ),
                             html.Div(
