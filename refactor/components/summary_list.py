@@ -24,6 +24,8 @@ def _build_action_link(action: dict) -> html.A:
         children,
         href=action.get("href", "#"),
         className=action.get("className", "govuk-link"),
+        target=action.get("target", "_blank"),
+        rel=action.get("rel", "noopener noreferrer"),
     )
 
 

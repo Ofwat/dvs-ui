@@ -48,6 +48,20 @@ class DimensionLoaderStateTests(unittest.TestCase):
             ],
         )
 
+    def test_sharepoint_folder_name_prefers_query_path(self):
+        self.assertEqual(
+            dls._sharepoint_folder_name(  # noqa: SLF001
+                "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2Fsite%2FShared%20Documents%2FFolderA"
+            ),
+            "FolderA",
+        )
+        self.assertEqual(
+            dls._sharepoint_folder_name(  # noqa: SLF001
+                "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Forms/AllItems.aspx?RootFolder=%2Fsites%2Fsite%2FShared%20Documents%2FFolderB"
+            ),
+            "FolderB",
+        )
+
     def test_load_service_config_missing_path(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "missing.json"
@@ -147,7 +161,8 @@ class DimensionLoaderStateTests(unittest.TestCase):
         self.assertEqual(self._count_text(panel, "Refresh files"), 1)
         self.assertEqual(self._count_text(panel, "List files"), 1)
         self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
-        self.assertEqual(self._count_text(panel, "Open SharePoint folder"), 1)
+        self.assertIn("govuk-summary-list", str(panel))
+        self.assertEqual(self._count_text(panel, "Open folder"), 1)
 
         refresh_status = dls._build_dimension_loader_action_result("dimension-loader-refresh", "dev")  # noqa: SLF001
         list_status = dls._build_dimension_loader_action_result("dimension-loader-list", "dev")  # noqa: SLF001

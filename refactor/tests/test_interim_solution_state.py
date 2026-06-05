@@ -34,6 +34,20 @@ class InterimSolutionStateTests(unittest.TestCase):
         missing = get_missing_env_vars({"SHAREPOINT_HOST": "", "SHAREPOINT_SITE_PATH": "sites/ofw-ii"})
         self.assertEqual(missing, ["SHAREPOINT_HOST"])
 
+    def test_sharepoint_folder_name_prefers_query_path(self):
+        self.assertEqual(
+            iss._sharepoint_folder_name(  # noqa: SLF001
+                "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2Fsite%2FShared%20Documents%2FFolderA"
+            ),
+            "FolderA",
+        )
+        self.assertEqual(
+            iss._sharepoint_folder_name(  # noqa: SLF001
+                "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Forms/AllItems.aspx?RootFolder=%2Fsites%2Fsite%2FShared%20Documents%2FFolderB"
+            ),
+            "FolderB",
+        )
+
     def test_group_interim_jobs_by_environment(self):
         payload = {
             "jobs": [
@@ -106,7 +120,8 @@ class InterimSolutionStateTests(unittest.TestCase):
         self.assertEqual(self._count_text(panel, "Refresh files"), 1)
         self.assertEqual(self._count_text(panel, "List files"), 1)
         self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
-        self.assertEqual(self._count_text(panel, "Open SharePoint folder"), 1)
+        self.assertIn("govuk-summary-list", str(panel))
+        self.assertEqual(self._count_text(panel, "Open folder"), 1)
         self.assertEqual(
             iss._build_action_result("interim-solution-refresh", "dev"),  # noqa: SLF001
             "Refreshed 1 job(s) for DEV from the Interim Solution config.",

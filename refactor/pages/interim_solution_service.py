@@ -4,11 +4,13 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from components.radios import build_radio_group
+from components.summary_list import build_summary_list
 
 from .interim_solution_state import (
     get_interim_jobs,
@@ -169,11 +171,49 @@ def _build_transfer_text(state: dict[str, object] | None) -> str:
     return "Waiting for transfer progress..."
 
 
-def _build_sharepoint_folder_link(folder_url: str) -> html.A | str:
-    folder_url = str(folder_url or "").strip()
-    if not folder_url:
-        return ""
-    return html.A("Open SharePoint folder", href=folder_url, target="_blank", rel="noopener noreferrer")
+def _sharepoint_folder_name(folder_url: str) -> str:
+    parsed = urlparse(str(folder_url or "").strip())
+    query = parse_qs(parsed.query)
+    for key in ("id", "RootFolder", "folder"):
+        values = query.get(key) or []
+        for value in values:
+            path = unquote(str(value).strip().rstrip("/"))
+            if path:
+                folder_name = path.rsplit("/", 1)[-1].strip()
+                if folder_name and folder_name.lower() != "allitems.aspx":
+                    return folder_name
+    path = unquote(parsed.path.rstrip("/"))
+    if not path:
+        return "SharePoint folder"
+    parts = [segment for segment in path.split("/") if segment]
+    if not parts:
+        return "SharePoint folder"
+    last_segment = parts[-1].strip()
+    if last_segment.lower() == "allitems.aspx" and len(parts) >= 2:
+        return unquote(parts[-2]).strip() or "SharePoint folder"
+    return last_segment or "SharePoint folder"
+
+
+def _build_sharepoint_folder_rows(jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for job in jobs:
+        folder_url = str(job.get("source_folder_url", "")).strip()
+        rows.append(
+            {
+                "key": str(job.get("name", "")).strip() or "Unnamed job",
+                "value": _sharepoint_folder_name(folder_url),
+                "actions": [
+                    {
+                        "label": "Open folder",
+                        "href": folder_url,
+                        "visually_hidden_text": f"({str(job.get('name', '')).strip() or 'Unnamed job'})",
+                    }
+                ]
+                if folder_url
+                else [],
+            }
+        )
+    return rows
 
 
 def _build_pipeline_link(state: dict[str, object] | None) -> str:
@@ -530,18 +570,9 @@ def _build_action_panel(environment: str | None):
                     ),
                 ],
             ),
-            html.Ul(
-                className="govuk-list govuk-list--spaced govuk-!-margin-bottom-2",
-                children=[
-                    html.Li(
-                        children=[
-                            html.Span(f"{str(job.get('name', '')).strip() or 'Unnamed job'}", className="govuk-!-font-weight-bold"),
-                            html.Span(" | ", className="govuk-hint"),
-                            _build_sharepoint_folder_link(job.get("source_folder_url", "")),
-                        ]
-                    )
-                    for job in jobs
-                ],
+            build_summary_list(
+                _build_sharepoint_folder_rows(jobs),
+                classes="govuk-!-margin-bottom-2",
             ),
             html.P(
                 "Refresh updates the job summary, List shows the configured folders, and Sync uploads every file in the SharePoint folder before triggering any configured pipeline.",

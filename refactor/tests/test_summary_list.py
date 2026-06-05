@@ -40,6 +40,8 @@ class SummaryListTests(unittest.TestCase):
         action = row.children[2].children[0]
         self.assertEqual(action.href, "/change-dob")
         self.assertEqual(action.className, "govuk-link")
+        self.assertEqual(action.target, "_blank")
+        self.assertEqual(action.rel, "noopener noreferrer")
 
     def test_build_summary_card_with_actions(self):
         card = build_summary_card(
