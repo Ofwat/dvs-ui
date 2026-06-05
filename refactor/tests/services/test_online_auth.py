@@ -106,7 +106,12 @@ class OnlineAuthTests(unittest.TestCase):
     @patch("refactor.online_auth._load_auth_record")
     def test_get_current_auth_identity_uses_cached_record(self, load_auth_record, cached_token):
         load_auth_record.return_value = SimpleNamespace(username="user@example.com")
-        cached_token.return_value = {"token": "tok", "expires_on": 2000.0}
+        cached_token.side_effect = [
+            {"token": "tok", "expires_on": 2000.0},
+            {"token": "tok", "expires_on": 2000.0},
+            {"token": "tok", "expires_on": 2000.0},
+            None,
+        ]
 
         identity = online_auth.get_current_auth_identity()
 
@@ -115,6 +120,8 @@ class OnlineAuthTests(unittest.TestCase):
         self.assertEqual(identity["username"], "user@example.com")
         self.assertEqual(identity["initials"], "UE")
         self.assertIn("Signed in", identity["status_message"])
+        self.assertIn("Granted: SharePoint, Fabric", identity["permission_summary"])
+        self.assertIn("Not currently available: OneLake", identity["permission_summary"])
 
     @patch("refactor.online_auth._clear_auth_record")
     @patch("refactor.online_auth.TOKEN_MANAGER")

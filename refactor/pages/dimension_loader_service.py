@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 
 from dash import Input, Output, State, callback_context, dcc, html, no_update
@@ -349,6 +350,25 @@ def _resolve_latest_pipeline_run_id(auth, workspace_id: str, pipeline_id: str) -
     return "" if run_id.lower() == "none" else run_id
 
 
+def _resolve_new_pipeline_run_id(
+    auth,
+    workspace_id: str,
+    pipeline_id: str,
+    previous_run_id: str = "",
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.5,
+) -> str:
+    previous_run_id = str(previous_run_id).strip()
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    while True:
+        run_id = _resolve_latest_pipeline_run_id(auth, workspace_id, pipeline_id)
+        if run_id and run_id != previous_run_id:
+            return run_id
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(max(poll_interval_seconds, 0.1))
+
+
 def _refresh_pipeline_status(state: dict[str, object]) -> dict[str, object]:
     pipeline_run_id = str(state.get("pipeline_run_id", "")).strip()
     pipeline_workspace_id = str(state.get("pipeline_workspace_id", "")).strip()
@@ -658,7 +678,7 @@ def _trigger_dimension_pipeline(uploader, config: dict[str, object], selected_en
     if not pipeline_id:
         raise RuntimeError(f"Pipeline '{pipeline_display_name}' does not have an id.")
 
-    pipeline_run_id = _resolve_latest_pipeline_run_id(auth, workspace_id, pipeline_id)
+    previous_run_id = _resolve_latest_pipeline_run_id(auth, workspace_id, pipeline_id)
     trigger_payload = dict(parameters)
     trigger_payload.setdefault("environment", selected_env)
     trigger_ok, trigger_response = auth.trigger_fabric_pipeline(
@@ -667,7 +687,7 @@ def _trigger_dimension_pipeline(uploader, config: dict[str, object], selected_en
         parameters=trigger_payload,
     )
     common.require_ok("trigger_fabric_pipeline", trigger_ok, trigger_response)
-    pipeline_run_id = pipeline_run_id or str(
+    pipeline_run_id = str(
         trigger_response.get("id")
         or trigger_response.get("jobInstanceId")
         or trigger_response.get("jobId")
@@ -675,7 +695,12 @@ def _trigger_dimension_pipeline(uploader, config: dict[str, object], selected_en
         or ""
     ).strip()
     if not pipeline_run_id:
-        pipeline_run_id = _resolve_latest_pipeline_run_id(auth, workspace_id, pipeline_id)
+        pipeline_run_id = _resolve_new_pipeline_run_id(
+            auth,
+            workspace_id,
+            pipeline_id,
+            previous_run_id=previous_run_id,
+        )
 
     return workspace_id, pipeline_id, pipeline_run_id, pipeline_workspace_name, pipeline_display_name
 

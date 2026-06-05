@@ -62,6 +62,11 @@ SITE_PATH = os.getenv("SHAREPOINT_SITE_PATH", "sites/*")
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 SHAREPOINT_SCOPE = "https://graph.microsoft.com/.default"
 ONELAKE_SCOPE = "https://storage.azure.com/.default"
+AUTH_SCOPE_LABELS = (
+    ("SharePoint", SHAREPOINT_SCOPE),
+    ("Fabric", FABRIC_SCOPE),
+    ("OneLake", ONELAKE_SCOPE),
+)
 FABRIC_WORKSPACES_URL = "https://api.fabric.microsoft.com/v1/workspaces"
 FABRIC_PIPELINES_URL = "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/dataPipelines"
 FABRIC_LAKEHOUSES_URL = "https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses"
@@ -330,6 +335,17 @@ def _build_initials(source: str) -> str:
     return initials or "?"
 
 
+def _build_permission_summary() -> dict[str, list[str]]:
+    granted: list[str] = []
+    missing: list[str] = []
+    for label, scope in AUTH_SCOPE_LABELS:
+        if _cached_token(scope):
+            granted.append(label)
+        else:
+            missing.append(label)
+    return {"granted": granted, "missing": missing}
+
+
 def get_current_auth_identity() -> dict[str, Any]:
     record = _load_auth_record()
     if not record:
@@ -339,6 +355,7 @@ def get_current_auth_identity() -> dict[str, Any]:
             "username": None,
             "initials": None,
             "status_message": "Not signed in.",
+            "permission_summary": "Permissions: none",
         }
 
     username = getattr(record, "username", None) or ""
@@ -349,12 +366,16 @@ def get_current_auth_identity() -> dict[str, Any]:
         status_message = f"Signed in. Token expires in {expires_in}s."
     else:
         status_message = "Signed in."
+    permission_summary = _build_permission_summary()
+    granted = ", ".join(permission_summary["granted"]) if permission_summary["granted"] else "none"
+    missing = ", ".join(permission_summary["missing"]) if permission_summary["missing"] else "none"
     return {
         "signed_in": True,
         "display_name": display_name,
         "username": username or None,
         "initials": _build_initials(username or display_name),
         "status_message": status_message,
+        "permission_summary": f"Granted: {granted} | Not currently available: {missing}",
     }
 
 

@@ -6,6 +6,16 @@ def build_auth_widget(identity: dict | None = None):
     identity = identity or {}
     signed_in = bool(identity.get("signed_in"))
     status_message = identity.get("status_message") or ("Signed in." if signed_in else "Not signed in.")
+    permission_summary = identity.get("permission_summary") or "Permissions: none"
+    tooltip = " | ".join(
+        part
+        for part in [
+            identity.get("username"),
+            status_message,
+            permission_summary,
+        ]
+        if part
+    )
 
     if not signed_in:
         return html.Div(
@@ -30,9 +40,9 @@ def build_auth_widget(identity: dict | None = None):
                         "color": "#0b0c0c",
                         "fontWeight": "700",
                         "fontSize": "1rem",
-                    },
-                    children="?",
-                    title=status_message,
+                },
+                children="?",
+                    title=tooltip,
                 ),
                 html.Div(
                     children=[
@@ -78,12 +88,12 @@ def build_auth_widget(identity: dict | None = None):
                     "boxShadow": "inset 0 0 0 1px rgba(255, 255, 255, 0.12)",
                 },
                 children=initials[:2],
-                title=username,
+                title=tooltip,
             ),
             html.Div(
                 children=[
-                    html.Div(display_name, className="govuk-body govuk-!-margin-bottom-0"),
-                    html.Div(status_message, className="govuk-hint govuk-!-margin-bottom-0"),
+                    html.Div(display_name, className="govuk-body govuk-!-margin-bottom-0", title=tooltip),
+                    html.Div(status_message, className="govuk-hint govuk-!-margin-bottom-0", title=tooltip),
                 ]
             ),
             html.Button(

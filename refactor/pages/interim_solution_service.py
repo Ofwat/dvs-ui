@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -350,6 +351,25 @@ def _resolve_latest_pipeline_run_id(auth, workspace_id: str, pipeline_id: str) -
     return "" if run_id.lower() == "none" else run_id
 
 
+def _resolve_new_pipeline_run_id(
+    auth,
+    workspace_id: str,
+    pipeline_id: str,
+    previous_run_id: str = "",
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.5,
+) -> str:
+    previous_run_id = str(previous_run_id).strip()
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    while True:
+        run_id = _resolve_latest_pipeline_run_id(auth, workspace_id, pipeline_id)
+        if run_id and run_id != previous_run_id:
+            return run_id
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(max(poll_interval_seconds, 0.1))
+
+
 def _extract_pipeline_status(payload: dict[str, object] | None) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -644,6 +664,7 @@ def _trigger_configured_pipeline(uploader, job: dict[str, object]) -> str | None
     pipeline_item = _find_by_display_name(list(pipelines_payload), pipeline_display_name, "Pipeline")
     pipeline_id = str(pipeline_item["id"])
 
+    previous_run_id = _resolve_latest_pipeline_run_id(auth, pipeline_workspace_id, pipeline_id)
     raw_parameters = pipeline.get("parameters", {})
     parameters = dict(raw_parameters) if isinstance(raw_parameters, dict) else {}
     input_folder_path = str(job.get("_run_folder_path", "")).strip()
@@ -662,7 +683,12 @@ def _trigger_configured_pipeline(uploader, job: dict[str, object]) -> str | None
     if pipeline_run_id.lower() == "none":
         pipeline_run_id = ""
     if not pipeline_run_id:
-        pipeline_run_id = _resolve_latest_pipeline_run_id(auth, pipeline_workspace_id, pipeline_id)
+        pipeline_run_id = _resolve_new_pipeline_run_id(
+            auth,
+            pipeline_workspace_id,
+            pipeline_id,
+            previous_run_id=previous_run_id,
+        )
     job["_pipeline_workspace_id"] = pipeline_workspace_id
     job["_pipeline_id"] = pipeline_id
     job["_pipeline_run_id"] = pipeline_run_id

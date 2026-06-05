@@ -186,16 +186,7 @@ class InterimSolutionStateTests(unittest.TestCase):
         auth._ensure_authenticated = Mock(return_value=None)
         auth.list_fabric_workspaces = Mock(return_value=(True, [{"id": "workspace-pipeline", "displayName": "dev-ocean"}]))
         auth.list_fabric_pipelines = Mock(return_value=(True, [{"id": "pipeline-1", "displayName": "Refresh Interim"}]))
-        auth.trigger_fabric_pipeline = Mock(
-            return_value=(
-                True,
-                {
-                    "workspace_id": "workspace-pipeline",
-                    "pipeline_id": "pipeline-1",
-                    "parameters": {"mode": "dev"},
-                },
-            )
-        )
+        auth.trigger_fabric_pipeline = Mock(return_value=(True, {}))
         auth.get_fabric_pipeline_run = Mock(
             return_value=(
                 True,
@@ -208,7 +199,13 @@ class InterimSolutionStateTests(unittest.TestCase):
                 },
             )
         )
-        auth.list_fabric_pipeline_runs = Mock(return_value=(True, [{"id": "pipeline-run-1", "status": "NotStarted"}]))
+        auth.list_fabric_pipeline_runs = Mock(
+            side_effect=[
+                (True, [{"id": "pipeline-run-old", "status": "NotStarted"}]),
+                (True, [{"id": "pipeline-run-old", "status": "NotStarted"}]),
+                (True, [{"id": "pipeline-run-1", "status": "NotStarted"}]),
+            ]
+        )
         iss._SYNC_RUNS.clear()  # noqa: SLF001
         with patch("pages.interim_solution_service.threading.Thread") as mock_thread:
             class _FakeThread:
@@ -253,6 +250,7 @@ class InterimSolutionStateTests(unittest.TestCase):
             "pipeline-1",
             parameters={"mode": "dev", "input_folder_path": "Files/test/20260603T120000Z_abcd1234"},
         )
+        self.assertGreaterEqual(auth.list_fabric_pipeline_runs.call_count, 2)
         self.assertEqual(
             upload_bytes_with_progress.call_args.args[2],
             "Files/test/20260603T120000Z_abcd1234/dev/file1.xlsx",

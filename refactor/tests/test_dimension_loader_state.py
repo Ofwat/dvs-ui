@@ -249,8 +249,14 @@ class DimensionLoaderStateTests(unittest.TestCase):
         auth._ensure_authenticated = Mock(return_value=None)
         auth.list_fabric_workspaces = Mock(return_value=(True, [{"id": "workspace-pipeline", "displayName": "dev-ocean"}]))
         auth.list_fabric_pipelines = Mock(return_value=(True, [{"id": "pipeline-1", "displayName": "Refresh Dimensions"}]))
-        auth.list_fabric_pipeline_runs = Mock(return_value=(True, [{"id": "pipeline-run-1", "status": "NotStarted"}]))
-        auth.trigger_fabric_pipeline = Mock(return_value=(True, {"id": "pipeline-run-1"}))
+        auth.list_fabric_pipeline_runs = Mock(
+            side_effect=[
+                (True, [{"id": "pipeline-run-old", "status": "NotStarted"}]),
+                (True, [{"id": "pipeline-run-old", "status": "NotStarted"}]),
+                (True, [{"id": "pipeline-run-1", "status": "NotStarted"}]),
+            ]
+        )
+        auth.trigger_fabric_pipeline = Mock(return_value=(True, {}))
         auth.get_fabric_pipeline_run = Mock(
             return_value=(
                 True,
@@ -310,6 +316,7 @@ class DimensionLoaderStateTests(unittest.TestCase):
             "pipeline-1",
             parameters={"mode": "dev", "environment": "dev"},
         )
+        self.assertGreaterEqual(auth.list_fabric_pipeline_runs.call_count, 2)
         upload_mapping.assert_called_once()
         self.assertEqual(upload_mapping.call_args.args[1]["source_relative_path"], "a.xlsx")
         self.assertEqual(upload_mapping.call_args.args[1]["source_link"], "https://example.test/folder")

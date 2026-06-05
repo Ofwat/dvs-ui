@@ -11,6 +11,7 @@ class HeaderAuthTests(unittest.TestCase):
         text = str(widget)
         self.assertIn("Log in", text)
         self.assertIn("Not signed in", text)
+        self.assertIn("Permissions: none", text)
 
     def test_signed_in_widget_shows_initials_and_logout(self):
         widget = build_auth_widget(
@@ -20,11 +21,13 @@ class HeaderAuthTests(unittest.TestCase):
                 "username": "user@example.com",
                 "initials": "SZ",
                 "status_message": "Signed in.",
+                "permission_summary": "Granted: SharePoint, Fabric | Not currently available: OneLake",
             }
         )
         text = str(widget)
         self.assertIn("SZ", text)
         self.assertIn("Log out", text)
+        self.assertIn("Granted: SharePoint, Fabric", text)
 
 
 if __name__ == "__main__":
