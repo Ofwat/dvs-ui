@@ -576,12 +576,6 @@ def _build_action_panel(environment: str | None):
                 className="govuk-button-group",
                 children=[
                     html.Button(
-                        "Refresh files",
-                        type="button",
-                        id="dimension-loader-refresh",
-                        className="govuk-button govuk-button--secondary",
-                    ),
-                    html.Button(
                         "List files",
                         type="button",
                         id="dimension-loader-list",
@@ -619,8 +613,6 @@ def _build_dimension_loader_action_result(action_id: str, environment: str | Non
             + "."
         )
 
-    if action_id == "dimension-loader-refresh":
-        return f"Refreshed {len(jobs)} job(s) for {selected_env.upper()} from the Dimensions Loader config."
     if action_id == "dimension-loader-list":
         if not jobs:
             return f"No SharePoint-backed jobs found for {selected_env.upper()}."
@@ -974,22 +966,18 @@ def register_dimension_loader_callbacks(app):
         Output("dimension-loader-pipeline-link", "children"),
         Output("dimension-loader-sync-state", "data"),
         Output("dimension-loader-sync-poll", "disabled"),
-        Input("dimension-loader-refresh", "n_clicks"),
         Input("dimension-loader-list", "n_clicks"),
         Input("dimension-loader-sync", "n_clicks"),
         Input("dimension-loader-environment", "value"),
         prevent_initial_call=True,
     )
-    def handle_dimension_loader_actions(refresh_clicks, list_clicks, sync_clicks, environment):
+    def handle_dimension_loader_actions(list_clicks, sync_clicks, environment):
         trigger = callback_context.triggered[0] if callback_context.triggered else None
         if not trigger:
             raise PreventUpdate
 
         component_id = str(trigger.get("prop_id", "")).split(".", 1)[0]
         _debug(f"Callback action trigger={component_id} environment={environment}")
-        if component_id == "dimension-loader-refresh":
-            status = _build_dimension_loader_action_result(component_id, environment)
-            return status, "", "", no_update, "", "", "", "", None, True
         if component_id == "dimension-loader-list":
             status = _build_dimension_loader_action_result(component_id, environment)
             return status, "", "", _build_list_results(environment), "", "", "", "", None, True

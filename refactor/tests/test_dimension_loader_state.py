@@ -158,15 +158,12 @@ class DimensionLoaderStateTests(unittest.TestCase):
     @patch("pages.dimension_loader_service.load_service_config", return_value=({"jobs": []}, None))
     def test_action_helpers_render_status_text(self, *_):
         panel = dls._build_action_panel("dev")  # noqa: SLF001
-        self.assertEqual(self._count_text(panel, "Refresh files"), 1)
         self.assertEqual(self._count_text(panel, "List files"), 1)
         self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
         self.assertIn("govuk-summary-list", str(panel))
         self.assertEqual(self._count_text(panel, "Open folder"), 1)
 
-        refresh_status = dls._build_dimension_loader_action_result("dimension-loader-refresh", "dev")  # noqa: SLF001
         list_status = dls._build_dimension_loader_action_result("dimension-loader-list", "dev")  # noqa: SLF001
-        self.assertEqual(refresh_status, "Refreshed 1 job(s) for DEV from the Dimensions Loader config.")
         self.assertEqual(list_status, "DEV folder scan ready.")
 
         list_results = dls._build_list_results("dev")  # noqa: SLF001

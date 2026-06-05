@@ -117,15 +117,10 @@ class InterimSolutionStateTests(unittest.TestCase):
     @patch("pages.interim_solution_service.load_service_config", return_value=({"jobs": []}, None))
     def test_action_panel_renders_buttons(self, *_):
         panel = iss._build_action_panel("dev")  # noqa: SLF001
-        self.assertEqual(self._count_text(panel, "Refresh files"), 1)
         self.assertEqual(self._count_text(panel, "List files"), 1)
         self.assertEqual(self._count_text(panel, "Sync dimensions Fabric with SharePoint"), 1)
         self.assertIn("govuk-summary-list", str(panel))
         self.assertEqual(self._count_text(panel, "Open folder"), 1)
-        self.assertEqual(
-            iss._build_action_result("interim-solution-refresh", "dev"),  # noqa: SLF001
-            "Refreshed 1 job(s) for DEV from the Interim Solution config.",
-        )
         self.assertEqual(
             iss._build_action_result("interim-solution-list", "dev"),  # noqa: SLF001
             "DEV folder scan ready.",

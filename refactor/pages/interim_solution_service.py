@@ -551,12 +551,6 @@ def _build_action_panel(environment: str | None):
                 className="govuk-button-group",
                 children=[
                     html.Button(
-                        "Refresh files",
-                        type="button",
-                        id="interim-solution-refresh",
-                        className="govuk-button govuk-button--secondary",
-                    ),
-                    html.Button(
                         "List files",
                         type="button",
                         id="interim-solution-list",
@@ -598,8 +592,6 @@ def _build_action_result(action_id: str, environment: str | None) -> str:
             + "."
         )
 
-    if action_id == "interim-solution-refresh":
-        return f"Refreshed {len(jobs)} job(s) for {selected_env.upper()} from the Interim Solution config."
     if action_id == "interim-solution-list":
         if not jobs:
             return f"No SharePoint folder jobs found for {selected_env.upper()}."
@@ -1033,22 +1025,18 @@ def register_interim_solution_callbacks(app):
         Output("interim-solution-results", "children"),
         Output("interim-solution-sync-state", "data"),
         Output("interim-solution-sync-poll", "disabled"),
-        Input("interim-solution-refresh", "n_clicks"),
         Input("interim-solution-list", "n_clicks"),
         Input("interim-solution-sync", "n_clicks"),
         Input("interim-solution-environment", "value"),
         prevent_initial_call=True,
     )
-    def handle_interim_solution_actions(refresh_clicks, list_clicks, sync_clicks, environment):
+    def handle_interim_solution_actions(list_clicks, sync_clicks, environment):
         trigger = callback_context.triggered[0] if callback_context.triggered else None
         if not trigger:
             raise PreventUpdate
 
         component_id = str(trigger.get("prop_id", "")).split(".", 1)[0]
         _debug(f"Callback action trigger={component_id} environment={environment}")
-        if component_id == "interim-solution-refresh":
-            status = _build_action_result(component_id, environment)
-            return status, "", "", "", "", "", "", "", no_update, None, True
         if component_id == "interim-solution-list":
             status = _build_action_result(component_id, environment)
             return status, "", "", "", "", "", "", "", _build_list_results(environment), None, True
