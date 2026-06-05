@@ -57,7 +57,7 @@ app.layout = html.Div(
                 ),
             ],
         ),
-        build_phase(),
+        html.Div(id="phase-banner-slot", children=build_phase() if initial_page["show_phase"] else None),
         html.Div(id="masthead-slot", children=initial_page["masthead"]),
         html.Main(
             id="main-content",
@@ -99,6 +99,7 @@ def render_auth_widget(_pathname: str | None, _login_clicks: int | None, _logout
 @app.callback(
     Output("service-navigation-wrapper", "className"),
     Output("service-navigation", "children"),
+    Output("phase-banner-slot", "children"),
     Output("masthead-slot", "children"),
     Output("main-content", "children"),
     Input("url", "pathname"),
@@ -114,6 +115,7 @@ def render_page(pathname: str | None, search: str | None):
     return (
         page["nav_class"],
         nav_children,
+        build_phase() if page["show_phase"] else None,
         page["masthead"],
         page["content"],
     )

@@ -26,6 +26,7 @@ _BASE_DEFINITIONS = [
         "masthead": build_home_masthead,
         "nav": False,
         "nav_class": "govuk-service-navigation govuk-service-navigation--inverse app-service-navigation",
+        "show_phase": False,
     },
     {
         "label": "Get started",
@@ -33,6 +34,7 @@ _BASE_DEFINITIONS = [
         "content": build_get_started_content,
         "nav": True,
         "nav_class": "govuk-service-navigation app-service-navigation",
+        "show_phase": False,
     },
     {
         "label": "Services",
@@ -40,6 +42,7 @@ _BASE_DEFINITIONS = [
         "content": build_services_content,
         "nav": True,
         "nav_class": "govuk-service-navigation app-service-navigation",
+        "show_phase": False,
     },
 ]
 
@@ -51,6 +54,7 @@ _DETAIL_PAGE_DEFINITIONS.append(
         "content": build_dimension_loader_content,
         "nav": False,
         "nav_class": "govuk-service-navigation app-service-navigation",
+        "show_phase": True,
     }
 )
 _DETAIL_PAGE_DEFINITIONS.append(
@@ -60,6 +64,7 @@ _DETAIL_PAGE_DEFINITIONS.append(
         "content": build_interim_solution_content,
         "nav": False,
         "nav_class": "govuk-service-navigation app-service-navigation",
+        "show_phase": True,
     }
 )
 for service in SERVICE_DETAIL_PAGES:
@@ -70,6 +75,7 @@ for service in SERVICE_DETAIL_PAGES:
             "content": lambda service=service: build_service_detail_content(service),
             "nav": False,
             "nav_class": "govuk-service-navigation app-service-navigation",
+            "show_phase": True,
         }
     )
     for mode in service.get("modes", []):
@@ -80,6 +86,7 @@ for service in SERVICE_DETAIL_PAGES:
                 "content": lambda service=service, mode=mode: build_mode_detail(service, mode),
                 "nav": False,
                 "nav_class": "govuk-service-navigation app-service-navigation",
+                "show_phase": True,
             }
         )
 
@@ -102,6 +109,7 @@ def _build_page_payload(definition: dict) -> dict:
         "content": definition["content"](),
         "masthead": masthead_children,
         "nav_class": definition.get("nav_class", "govuk-service-navigation app-service-navigation"),
+        "show_phase": definition.get("show_phase", False),
     }
 
 
