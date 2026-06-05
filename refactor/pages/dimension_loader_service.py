@@ -7,6 +7,8 @@ import uuid
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
+from components.radios import build_radio_group
+
 from .dimension_loader_state import (
     build_env_missing_message,
     get_dimension_jobs,
@@ -437,25 +439,14 @@ def build_dimension_loader_content():
                         DIMENSION_LOADER_SERVICE["description"],
                         className="govuk-body govuk-!-margin-bottom-4",
                     ),
-                    html.H3("Choose environment", className="govuk-heading-m"),
-                    html.Div(
-                        className="govuk-radios govuk-radios--inline govuk-!-margin-bottom-6",
-                        children=[
-                            html.Div(
-                                className="govuk-radios__item",
-                                children=[
-                                    dcc.RadioItems(
-                                        id="dimension-loader-environment",
-                                        options=[
-                                            {"label": "dev", "value": "dev"},
-                                            {"label": "prod", "value": "prod"},
-                                        ],
-                                        value="dev",
-                                        inline=True,
-                                    )
-                                ],
-                            )
+                    build_radio_group(
+                        legend="Choose environment",
+                        radio_id="dimension-loader-environment",
+                        options=[
+                            {"label": "dev", "value": "dev"},
+                            {"label": "prod", "value": "prod"},
                         ],
+                        value="dev",
                     ),
                     html.Div(id="dimension-loader-action-panel"),
                     html.Div(

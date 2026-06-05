@@ -1,0 +1,68 @@
+.app-radio-group {
+  margin-top: 0.25rem;
+}
+
+.app-radio-group label.app-radio-group__label {
+  box-sizing: border-box;
+  position: relative;
+  display: block;
+  min-height: 40px;
+  margin-bottom: 10px;
+  padding: 7px 15px 7px 52px;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.app-radio-group label.app-radio-group__label.govuk-label {
+  margin-bottom: 10px;
+  max-width: none;
+}
+
+.app-radio-group input[type="radio"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 40px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.app-radio-group label.app-radio-group__label::before {
+  content: "";
+  box-sizing: border-box;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 40px;
+  height: 40px;
+  border: 2px solid #0b0c0c;
+  border-radius: 50%;
+  background: transparent;
+  pointer-events: none;
+}
+
+.app-radio-group label.app-radio-group__label::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 0;
+  height: 0;
+  border: 10px solid #0b0c0c;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-radio-group label.app-radio-group__label:has(input[type="radio"]:checked)::after {
+  opacity: 1;
+}
+
+.app-radio-group label.app-radio-group__label:has(input[type="radio"]:focus)::before {
+  border-width: 4px;
+  outline: 3px solid transparent;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px #fd0;
+}
