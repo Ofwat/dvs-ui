@@ -22,34 +22,9 @@ def build_auth_widget(identity: dict | None = None):
             className="app-auth-widget",
             style={
                 "display": "flex",
-                "alignItems": "center",
-                "gap": "0.75rem",
                 "justifyContent": "flex-end",
-                "flexWrap": "wrap",
             },
             children=[
-                html.Div(
-                    style={
-                        "width": "2.5rem",
-                        "height": "2.5rem",
-                        "borderRadius": "50%",
-                        "display": "inline-flex",
-                        "alignItems": "center",
-                        "justifyContent": "center",
-                        "backgroundColor": "#b1b4b6",
-                        "color": "#0b0c0c",
-                        "fontWeight": "700",
-                        "fontSize": "1rem",
-                },
-                children="?",
-                    title=tooltip,
-                ),
-                html.Div(
-                    children=[
-                        html.Div("Not signed in", className="govuk-body govuk-!-margin-bottom-0"),
-                        html.Div(status_message, className="govuk-hint govuk-!-margin-bottom-0"),
-                    ]
-                ),
                 html.Button(
                     "Log in",
                     id="auth-login-button",
@@ -70,6 +45,7 @@ def build_auth_widget(identity: dict | None = None):
             "gap": "0.75rem",
             "justifyContent": "flex-end",
             "flexWrap": "wrap",
+            "color": "#ffffff",
         },
         children=[
             html.Div(
@@ -92,15 +68,20 @@ def build_auth_widget(identity: dict | None = None):
             ),
             html.Div(
                 children=[
-                    html.Div(display_name, className="govuk-body govuk-!-margin-bottom-0", title=tooltip),
-                    html.Div(status_message, className="govuk-hint govuk-!-margin-bottom-0", title=tooltip),
+                    html.Div(
+                        display_name,
+                        className="govuk-body govuk-!-margin-bottom-0",
+                        style={"color": "#ffffff"},
+                        title=tooltip,
+                    ),
+                    html.A(
+                        "Log out",
+                        id="auth-logout-button",
+                        href="#",
+                        className="govuk-link govuk-link--inverse govuk-!-margin-bottom-0",
+                        style={"color": "#ffffff"},
+                    ),
                 ]
-            ),
-            html.Button(
-                "Log out",
-                id="auth-logout-button",
-                type="button",
-                className="govuk-button govuk-button--secondary govuk-!-margin-bottom-0",
             ),
         ],
     )
