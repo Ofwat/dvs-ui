@@ -32,6 +32,19 @@ class AppStartupTests(unittest.TestCase):
             sys.path.remove(str(refactor_dir))
             sys.modules.pop("app", None)
 
+    def test_app_layout_includes_phase_banner(self):
+        refactor_dir = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(refactor_dir))
+        try:
+            sys.modules.pop("app", None)
+            module = importlib.import_module("app")
+            layout_text = str(module.app.layout)
+            self.assertIn("govuk-phase-banner", layout_text)
+            self.assertIn("give your feedback by email", layout_text)
+        finally:
+            sys.path.remove(str(refactor_dir))
+            sys.modules.pop("app", None)
+
 
 if __name__ == "__main__":
     unittest.main()
