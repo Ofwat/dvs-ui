@@ -15,6 +15,7 @@ from dash.exceptions import PreventUpdate
 
 from components.service_navigation import build_service_navigation
 from components.header import build_auth_widget, build_header
+from components.footer import build_footer
 from pages import DEFAULT_PAGE, get_navigation_pages, get_page_by_path
 from pages.data_validation_service import register_online_mode_callbacks
 from pages.dimension_loader_service import register_dimension_loader_callbacks
@@ -61,6 +62,7 @@ app.layout = html.Div(
             className="govuk-width-container app-width-container",
             children=initial_page["content"],
         ),
+        build_footer(),
     ],
 )
 
